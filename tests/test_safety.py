@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -52,6 +53,34 @@ class PathRulesTest(TmpHome):
         os.symlink(str(other), str(self.home / ".claude/skills/career"))
         self.refused({"op": "move", "src": str(self.home / "Documents/my-skills"),
                       "dst": str(self.home / "Documents/Archive/my-skills")})
+
+
+    def test_case_variants_cannot_bypass_protection(self):
+        tool = self.home / "Documents/MACOrganizer/skills/organize"
+        tool.mkdir(parents=True)
+        with mock.patch.object(organizer, "skill_dir", lambda: tool.resolve()):
+            for variant in ("documents/macorganizer", "DOCUMENTS/MacOrganizer"):
+                self.assertIsNotNone(organizer.check_path(self.home / variant, "source"), variant)
+
+
+class JournalTest(TmpHome):
+    def test_bad_run_ids_rejected(self):
+        organizer.apply_plan([{"op": "move", "src": str(self.touch("Desktop/a")),
+                               "dst": str(self.home / "Documents/a")}])
+        for bad in ("../../etc/passwd", "20261125-203926", "x"):
+            with self.assertRaises(ValueError):
+                organizer.undo(bad)
+
+    def test_tampered_journal_paths_refused(self):
+        secret = self.touch(".ssh/id_rsa")
+        run_id, _ = organizer.apply_plan([{"op": "move", "src": str(self.touch("Desktop/a")),
+                                           "dst": str(self.home / "Documents/a")}])
+        j = organizer.journal_dir() / f"{run_id}.jsonl"
+        j.write_text(json.dumps({"op": "move", "src": str(self.home / "Desktop/stolen"),
+                                 "dst": str(secret)}) + "\n")
+        res = organizer.undo(run_id)
+        self.assertEqual(res[0]["status"], "error")
+        self.assertTrue(secret.exists())
 
 
 class SymlinkTest(TmpHome):

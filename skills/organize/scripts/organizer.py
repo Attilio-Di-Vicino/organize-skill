@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -124,7 +125,8 @@ def user_folders() -> dict:
     return {k: found.get(k, v) for k, v in defaults.items()}
 
 
-CLOUD_ROOT_RE = re.compile(r"^(iCloud Drive|OneDrive.*|Dropbox.*|Google Drive.*|My Drive|Box|pCloud Drive|MEGA)$", re.I)
+RUN_ID_RE = re.compile(r"^\d{8}-\d{6}(-\d+)?$")
+CLOUD_ROOT_RE =re.compile(r"^(iCloud Drive|OneDrive.*|Dropbox.*|Google Drive.*|My Drive|Box|pCloud Drive|MEGA)$", re.I)
 
 
 def _abs(p: Path) -> Path:
@@ -137,12 +139,19 @@ def skill_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _key(p: Path) -> str:
+    """Comparable form of a path. macOS and Windows filesystems are case-insensitive and
+    normalize Unicode, so compare case-folded NFC there; Linux compares exactly."""
+    s = str(p).rstrip("/\\") or str(p)
+    if platform_name() in ("macos", "windows"):
+        s = unicodedata.normalize("NFC", s).casefold()
+    return s
+
+
 def _inside(child: Path, parent: Path) -> bool:
-    try:
-        child.relative_to(parent)
-        return True
-    except ValueError:
-        return False
+    """True if child is parent or anywhere below it."""
+    c, p = _key(child), _key(parent)
+    return c == p or c.startswith(p.rstrip("/\\") + os.sep) or c.startswith(p.rstrip("/\\") + "/")
 
 
 def check_path(p: Path, role: str) -> Optional[str]:
@@ -154,10 +163,10 @@ def check_path(p: Path, role: str) -> Optional[str]:
     """
     a = _abs(p)
     roots = [_abs(r).resolve() for r in user_folders().values()]
-    root = next((r for r in roots if _inside(a, r) and a != r), None)
+    root = next((r for r in roots if _inside(a, r) and _key(a) != _key(r)), None)
     if root is None:
         return f"{role} must be inside Desktop, Downloads or Documents"
-    rel = a.relative_to(root).parts
+    rel = a.parts[len(root.parts):]
     if any(part.startswith(".") for part in rel):
         return f"{role} is (inside) a hidden item"
     if CLOUD_ROOT_RE.match(rel[0]) and len(rel) == 1:
@@ -370,6 +379,15 @@ def _backend_by_name(name: Optional[str]):
     return {"macos": MacTrash, "freedesktop": LinuxTrash, "windows": WindowsTrash}.get(name or "", MacTrash)()
 
 
+def _trash_files_dir(backend: Optional[str]) -> Optional[Path]:
+    """Folder where a backend keeps trashed files (None for the Windows Recycle Bin)."""
+    if backend == "macos":
+        return MacTrash().dir()
+    if backend == "freedesktop":
+        return LinuxTrash().base() / "files"
+    return None
+
+
 def _clear_dir(d: Path) -> int:
     n = 0
     for name in os.listdir(d):
@@ -502,11 +520,30 @@ def undo(run_id: Optional[str] = None) -> List[dict]:
     if not runs:
         return []
     run_id = run_id or runs[-1]
+    if not RUN_ID_RE.match(run_id) or run_id not in runs:
+        raise ValueError(f"unknown run id {run_id!r} (see `runs`)")
     jpath = journal_dir() / f"{run_id}.jsonl"
     entries = [json.loads(l) for l in jpath.read_text(encoding="utf-8").splitlines() if l.strip()]
     results = []
     for e in reversed(entries):
-        res = {"op": f"undo-{e['op']}", "src": e.get("dst"), "dst": e.get("src"), "status": "ok", "msg": ""}
+        res = {"op": f"undo-{e.get('op')}", "src": e.get("dst"), "dst": e.get("src"), "status": "ok", "msg": ""}
+        # The journal is a file on disk: re-check every path it names before acting on it.
+        if e.get("op") == "mkdir":
+            denied = check_path(Path(e["dst"]), "folder")
+        elif e.get("op") == "move":
+            denied = check_path(Path(e["src"]), "destination") or check_path(Path(e["dst"]), "source")
+        elif e.get("op") == "trash":
+            denied = check_path(Path(e["src"]), "destination")
+            if not denied and e.get("dst"):
+                tdir = _trash_files_dir(e.get("backend"))
+                if tdir is None or not _inside(_abs(Path(e["dst"])), _abs(tdir).resolve()):
+                    denied = "trashed item is not in the Trash"
+        else:
+            denied = f"unknown journal op {e.get('op')!r}"
+        if denied:
+            res["status"], res["msg"] = "error", f"refused: {denied}"
+            results.append(res)
+            continue
         try:
             if e["op"] == "mkdir":
                 d = Path(e["dst"])
@@ -789,7 +826,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         run_id, results = apply_plan(actions)
         _print({"run_id": run_id, "results": results})
     elif args.cmd == "undo":
-        _print(undo(args.run_id))
+        try:
+            _print(undo(args.run_id))
+        except ValueError as ex:
+            _print({"error": str(ex)})
+            return 1
     elif args.cmd == "runs":
         _print(list_runs())
     elif args.cmd == "trash-list":
