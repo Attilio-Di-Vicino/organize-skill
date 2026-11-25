@@ -1,0 +1,11 @@
+{
+  "name": "organize-skill",
+  "owner": { "name": "Attilio Di Vicino" },
+  "plugins": [
+    {
+      "name": "organize",
+      "source": "./",
+      "description": "Tidy your computer: empty Desktop, Downloads and Trash and sort files into topic folders, asking before every action."
+    }
+  ]
+}
