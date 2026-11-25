@@ -83,6 +83,23 @@ class JournalTest(TmpHome):
         self.assertTrue(secret.exists())
 
 
+class LinuxJournalTest(TmpHome):
+    PLATFORM = "linux"
+
+    def test_tampered_info_path_is_ignored(self):
+        victim = self.touch("Documents/Finance/taxes.xlsx")
+        src = self.touch("Desktop/a.txt")
+        run_id, _ = organizer.apply_plan([{"op": "trash", "src": str(src)}])
+        j = organizer.journal_dir() / f"{run_id}.jsonl"
+        e = json.loads(j.read_text().splitlines()[0])
+        e["info"] = str(victim)
+        j.write_text(json.dumps(e) + "\n")
+        organizer.undo(run_id)
+        self.assertTrue(victim.exists())
+        self.assertTrue(src.exists())
+        self.assertFalse((self.home / ".local/share/Trash/info/a.txt.trashinfo").exists())
+
+
 class SymlinkTest(TmpHome):
     PLATFORM = "linux"
 

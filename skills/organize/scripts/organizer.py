@@ -277,8 +277,9 @@ class LinuxTrash:
 
     def restore(self, entry: dict) -> Tuple[str, str]:
         status, msg = _move_back(Path(entry["dst"]), Path(entry["src"]))
-        if status == "ok" and entry.get("info"):
-            Path(entry["info"]).unlink(missing_ok=True)
+        if status == "ok":
+            # Derive the .trashinfo path; never trust a path from the journal for deletion.
+            (self.base() / "info" / f"{Path(entry['dst']).name}.trashinfo").unlink(missing_ok=True)
         return status, msg
 
     def list(self) -> list:
