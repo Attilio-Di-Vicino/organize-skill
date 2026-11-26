@@ -40,7 +40,8 @@ class OnboardingTest(TmpHome):
                     if o.get("values_to"):
                         answers[q["id"]] = {"option": o["id"], "values": ["Alpha", "Beta"]}
                     elif o.get("text_to"):
-                        answers[q["id"]] = {"option": o["id"], "text": "{year} {title}"}
+                        text = "fr" if o["text_to"] == "naming.language" else "{year} {title}"
+                        answers[q["id"]] = {"option": o["id"], "text": text}
                     else:
                         answers[q["id"]] = o["id"]
                     if q["id"] == "documents" and o["id"] == "skip":
@@ -54,12 +55,12 @@ class OnboardingTest(TmpHome):
         code, out = self.apply({"desktop": "sections",
                                 "desktop_sections": {"option": "custom", "values": ["Lavoro", "Da fare"]},
                                 "downloads": "empty", "documents": "topics", "trash": "never",
-                                "language": "mine", "_user_language": "it"})
+                                "language": "system"})
         self.assertEqual(code, 0, out)
         cfg = out["config"]
         self.assertEqual(cfg["folders"]["desktop"], {"policy": "tidy", "sections": ["Lavoro", "Da fare"]})
         self.assertEqual(cfg["trash"], "never")
-        self.assertEqual(cfg["naming"]["language"], "it")
+        self.assertEqual(cfg["naming"]["language"], "system")
         _, info = self.cli("info")
         self.assertFalse(info["onboarding_needed"])
 
@@ -118,13 +119,14 @@ class OnboardingTest(TmpHome):
         _, info = self.cli("info")
         self.assertFalse(info["onboarding_needed"])
         self.assertIn("rename", info["onboarding_new_questions"])
+        self.assertIn("language", info["onboarding_new_questions"])
         self.assertNotIn("desktop", info["onboarding_new_questions"])
 
     def test_current_answers_reflect_config(self):
         _, out = self.apply({"desktop": "sections",
                              "desktop_sections": {"option": "custom", "values": ["A"]},
                              "trash": "never", "rename": "title_first", "stale": "2y",
-                             "language": "mine", "_user_language": "it"})
+                             "language": {"option": "other", "text": "it"}})
         _, ob = self.cli("onboarding")
         cur = ob["current_answers"]
         self.assertEqual(cur["desktop"], "sections")
@@ -132,7 +134,7 @@ class OnboardingTest(TmpHome):
         self.assertEqual(cur["trash"], "never")
         self.assertEqual(cur["rename"], "title_first")
         self.assertEqual(cur["stale"], "2y")
-        self.assertEqual(cur["language"], "mine")
+        self.assertEqual(cur["language"], "other")
         self.assertEqual(cur["protected"], "no")
 
     def test_partial_rerun_uses_config_for_conditions(self):
@@ -149,3 +151,18 @@ class OnboardingTest(TmpHome):
         self.assertEqual(out["config"]["rename_files"], {"pattern": "{year} {category} {title}", "scope": "all"})
         code, out = self.apply({"rename": {"option": "custom", "text": "{when} {title}"}})
         self.assertEqual(code, 1)
+
+    def test_preset_sections_can_be_translated(self):
+        _, out = self.apply({"desktop": "sections",
+                             "desktop_sections": {"option": "work_style", "values": ["In corso", "Da leggere", "Archivio"]}})
+        self.assertEqual(out["config"]["folders"]["desktop"]["sections"], ["In corso", "Da leggere", "Archivio"])
+        _, ob = self.cli("onboarding")
+        self.assertEqual(ob["current_answers"]["desktop_sections"], "work_style")
+        code, out = self.apply({"desktop_sections": {"option": "work_style", "values": ["Solo uno"]}})
+        self.assertEqual(code, 1)
+
+    def test_language_must_be_a_code(self):
+        code, out = self.apply({"language": {"option": "other", "text": "French"}})
+        self.assertEqual(code, 1)
+        code, out = self.apply({"language": {"option": "other", "text": "pt-BR"}})
+        self.assertEqual(code, 0, out)

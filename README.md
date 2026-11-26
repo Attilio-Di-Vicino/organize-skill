@@ -4,7 +4,7 @@
 Type `/organize` in [Claude Code](https://claude.com/claude-code) and it will:
 
 - empty your **Desktop**, **Downloads** and **Trash / Recycle Bin**
-- sort everything into **topic folders** in Documents (`Finance`, `Work`, `University`, `Projects`, `Media`…) with English, Title Case names
+- sort everything into **topic folders** in Documents (`Finance`, `Work`, `University`, `Projects`, `Media`…), named in **your computer's language** (`Finanza`, `Lavoro`… on an Italian system)
 - **rename files with unclear names** (`IMG_1234.jpg`, `document (3).pdf`) with your scheme, e.g. `2026-11-03 - Electricity Bill.pdf`
 - show your **biggest and long-forgotten files** and offer to archive them
 - work out what to **keep and what to throw away**: identical duplicates, zips you already extracted, installers for apps you already have, Office lock files, half-finished downloads
@@ -25,7 +25,7 @@ The first time you run `/organize`, before touching anything, Claude asks a few 
 ? How do you want your Documents folder? › Topic folders · Only remove junk · Don't touch it
 ? What should happen to the Trash?       › Offer to empty it · Never touch it
 ? Which sections do you want on the Desktop?  › Propose them · In progress / To read / Archive · I'll name them
-? In which language should new folders be named? …  ? Group confirmations or file by file? …
+? In which language should I name folders and files? › My computer's language · English · Another language  ? Group confirmations or file by file? …
 ? Should I rename files with unclear names?    › Keep their names · Date - Title · Title - Date · My own scheme
 ? Suggest archiving files you haven't opened in… › 6 months · 1 year · 2 years · Never
 ? Point out the files taking the most space?   › Over 100 MB · Over 500 MB · Over 1 GB · No
@@ -60,7 +60,7 @@ Out of the box `/organize` empties Desktop and Downloads, sorts everything into 
 | `protected` | `[]` | Paths never moved or trashed, nor anything inside them |
 | `keep` | `[]` | Name patterns never moved or trashed |
 | `trash` | `ask` | `ask` or `never` |
-| `naming` | `en`, `Title Case` | Language and case of new folder names |
+| `naming` | `system`, `Title Case` | Language of the names it creates — `system` follows each computer's display language (macOS `AppleLanguages`, Windows display language, Linux `LANGUAGE`/`LANG`), or a fixed code like `en` — and their case |
 | `taxonomy` | `[]` | Your top-level topic folders (empty = Claude proposes them) |
 | `max_depth` | `3` | Deepest folder level created |
 | `batch_size` | `8` | Items per confirmation question (`1` = one by one) |

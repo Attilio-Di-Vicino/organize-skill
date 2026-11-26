@@ -1,9 +1,9 @@
 {
   "_comment": [
     "Onboarding questions for /organize. Claude asks them round by round with AskUserQuestion",
-    "(max 4 questions per round, 2-4 options each; the user can always type 'Other'),",
-    "translated into the user's language. Answers are turned into ~/.organize/config.json by",
-    "`organizer.py onboarding --apply answers.json`.",
+    "(max 4 questions per round, 2-4 options each; the user can always type 'Other').",
+    "Keep the source text in English; Claude asks in the conversation's language. Answers are",
+    "turned into ~/.organize/config.json by `organizer.py onboarding --apply answers.json`.",
     "",
     "To extend the onboarding, add a question here. Fields:",
     "  id        unique answer key",
@@ -12,15 +12,16 @@
     "  when      optional: only ask if answers match, e.g. {\"desktop\": \"sections\"} (answers not given in this run come from the current config)",
     "            (a list value means any of them)",
     "  options   [{id, label, description, set, values_to}]",
-    "    set        config values to apply: {\"dotted.key\": value}; \"$user_language\" is replaced",
-    "               by the language code Claude passes as _user_language",
+    "    set        config values to apply: {\"dotted.key\": value}. If a value is a list of folder names",
+    "               (preset sections), Claude passes them translated into the naming language as",
+    "               {\"option\", \"values\"} (same length)",
     "    values_to  dotted config key of a LIST that receives the free-text values the user typed",
     "               (Claude splits the text into a list and passes it as {\"option\", \"values\"})",
     "    text_to    dotted config key of a STRING that receives what the user typed, as {\"option\", \"text\"}",
     "  since     onboarding version that introduced the question (users onboarded earlier are told",
     "            new options exist; they are only asked if they request a new onboarding)"
   ],
-  "version": 2,
+  "version": 3,
   "rounds": [
     {
       "id": "folders",
@@ -261,24 +262,32 @@
         {
           "id": "language",
           "header": "Names",
-          "question": "In which language should new folders be named?",
+          "question": "In which language should I name the folders and files I create?",
           "options": [
             {
-              "id": "mine",
-              "label": "My language",
-              "description": "The language we're talking in",
+              "id": "system",
+              "label": "My computer's language",
+              "description": "Follows the system language on each computer (detected: {system_language})",
               "set": {
-                "naming.language": "$user_language"
+                "naming.language": "system"
               }
             },
             {
               "id": "english",
               "label": "English",
+              "description": "Always English, whatever the system language",
               "set": {
                 "naming.language": "en"
               }
+            },
+            {
+              "id": "other",
+              "label": "Another language",
+              "description": "Type the language, e.g. French",
+              "text_to": "naming.language"
             }
-          ]
+          ],
+          "since": 3
         },
         {
           "id": "case",

@@ -1,6 +1,6 @@
 {
   "name": "organize",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Tidy your computer with Claude Code, your way: choose per folder whether to empty, tidy, keep or skip it, plus naming, topic folders, protected paths and custom rules in ~/.organize/config.json. Asks before every action, every run can be undone. macOS, Windows and Linux.",
   "author": {
     "name": "Attilio Di Vicino"

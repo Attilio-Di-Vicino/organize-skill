@@ -172,8 +172,9 @@ DEFAULT_CONFIG: dict = {
     "keep": [],
     # Trash: "ask" = offer to empty it at the end (separate confirmation); "never" = don't touch it.
     "trash": "ask",
-    # Names of folders Claude creates.
-    "naming": {"language": "en", "case": "Title Case"},
+    # Names of folders (and renamed files) Claude creates. language: "system" = the computer's
+    # display language (detected per machine), or a language code such as "en", "it".
+    "naming": {"language": "system", "case": "Title Case"},
     # Preferred top-level topic folders. Empty = Claude proposes a taxonomy from what it finds.
     "taxonomy": [],
     # Deepest folder level Claude creates under the destination.
@@ -198,6 +199,62 @@ DEFAULT_CONFIG: dict = {
 
 class ConfigError(ValueError):
     pass
+
+
+LANG_RE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
+
+
+def _lang_result(tag: str, source: str) -> Optional[dict]:
+    tag = (tag or "").strip().strip('"').split(".")[0].split("@")[0]
+    if not tag or tag.upper() in ("C", "POSIX") or not LANG_RE.match(tag):
+        return None
+    return {"code": re.split(r"[-_]", tag)[0].lower(), "tag": tag.replace("_", "-"), "source": source}
+
+
+def system_language() -> dict:
+    """The computer's display language: what the user sees in Finder / Explorer / their desktop.
+    Names Claude creates follow it when naming.language is "system"."""
+    forced = os.environ.get("ORGANIZE_SYSTEM_LANG")
+    if forced:
+        return _lang_result(forced, "ORGANIZE_SYSTEM_LANG") or {"code": "en", "tag": "en", "source": "default"}
+    plat = platform_name()
+    if plat == "macos":
+        try:
+            out = _run(["defaults", "read", "-g", "AppleLanguages"], capture_output=True, text=True, timeout=5).stdout
+            m = re.search(r'"?([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]+)*)"?', out.replace("(", " "))
+            r = m and _lang_result(m.group(1), "AppleLanguages")
+            if r:
+                return r
+        except Exception:
+            pass
+    if plat == "windows":
+        try:
+            import ctypes
+            import locale as _locale
+            lcid = ctypes.windll.kernel32.GetUserDefaultUILanguage()  # type: ignore[attr-defined]
+            r = _lang_result(_locale.windows_locale.get(lcid, ""), "Windows display language")
+            if r:
+                return r
+        except Exception:
+            pass
+    for var in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        val = os.environ.get(var, "")
+        r = _lang_result(val.split(":")[0], var)
+        if r:
+            return r
+    try:
+        import locale as _locale
+        r = _lang_result(_locale.getlocale()[0] or "", "locale")
+        if r:
+            return r
+    except Exception:
+        pass
+    return {"code": "en", "tag": "en", "source": "default"}
+
+
+def naming_language(cfg: dict) -> str:
+    lang = cfg["naming"]["language"]
+    return system_language()["code"] if lang == "system" else lang
 
 
 def config_path() -> Path:
@@ -276,6 +333,9 @@ def validate_config(raw) -> dict:
         raise ConfigError("advice must be true or false")
     if not isinstance(cfg["naming"], dict):
         raise ConfigError("naming must be an object")
+    lang = cfg["naming"].get("language")
+    if not isinstance(lang, str) or not (lang == "system" or LANG_RE.match(lang)):
+        raise ConfigError("naming.language must be \"system\" or a language code like \"en\", \"it\", \"pt-BR\"")
 
     h = _abs(home()).resolve()
     extras = []
@@ -391,7 +451,8 @@ def current_answers(cfg: dict) -> dict:
             chosen = None
             for o in q["options"]:          # 1. options whose `set` matches the config exactly
                 sets = o.get("set") or {}
-                if sets and all(_get_dotted(cfg, k) == v or (v == "$user_language" and _get_dotted(cfg, k) != "en")
+                if sets and all(_get_dotted(cfg, k) == v or (isinstance(v, list) and isinstance(_get_dotted(cfg, k), list)
+                                and len(v) == len(_get_dotted(cfg, k)) and v)
                                 for k, v in sets.items()):
                     chosen = o["id"]
                     break
@@ -433,21 +494,22 @@ def _set_dotted(cfg: dict, dotted: str, value) -> None:
 def onboarding_to_config(answers: dict, base: Optional[dict] = None) -> dict:
     """Turn onboarding answers into a raw config (merged over `base`), validated.
 
-    answers: {question_id: option_id | {"option": option_id, "values": [..]}, "_user_language": "it"}
+    answers: {question_id: option_id | {"option": option_id, "values": [..]} | {"option", "text"}}
+    For an option whose `set` holds a list of names (preset sections), "values" are the same
+    names translated into the naming language; they replace the preset (same length).
     Raises ConfigError on unknown questions/options or an invalid result.
     """
     ob = load_onboarding()
     raw = json.loads(json.dumps(base or {}))
     questions = {q["id"]: q for r in ob["rounds"] for q in r["questions"]}
-    lang = answers.get("_user_language") or "en"
-    unknown = set(answers) - set(questions) - {"_user_language"}
+    unknown = set(answers) - set(questions)
     if unknown:
         raise ConfigError(f"unknown onboarding question(s): {', '.join(sorted(unknown))}")
     try:
         context = current_answers(validate_config(raw))
     except ConfigError:
         context = {}
-    context.update({k: v for k, v in answers.items() if k != "_user_language"})
+    context.update(answers)
     for r in ob["rounds"]:
         for q in r["questions"]:
             if q["id"] not in answers or not _matches(q.get("when"), context):
@@ -458,7 +520,11 @@ def onboarding_to_config(answers: dict, base: Optional[dict] = None) -> dict:
             if opt is None:
                 raise ConfigError(f"{q['id']}: unknown option {opt_id!r}")
             for key, val in (opt.get("set") or {}).items():
-                _set_dotted(raw, key, lang if val == "$user_language" else val)
+                if isinstance(val, list) and values is not None and not opt.get("values_to"):
+                    if not isinstance(values, list) or len(values) != len(val) or not all(str(v).strip() for v in values):
+                        raise ConfigError(f"{q['id']}: translated values must be {len(val)} names, like {val}")
+                    val = [str(v).strip() for v in values]
+                _set_dotted(raw, key, val)
             if opt.get("values_to"):
                 if not isinstance(values, list) or not values:
                     raise ConfigError(f"{q['id']}: option {opt_id!r} needs \"values\" (a list)")
@@ -1402,6 +1468,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             access = False
         _print({"platform": plat, "home": str(home()),
                 "folders": {k: str(v) for k, v in user_folders().items()},
+                "system_language": system_language(), "naming_language": naming_language(cfg),
                 "managed": [{"name": n, "path": str(p), "policy": pol} for n, p, pol in managed_roots(cfg)],
                 "destination": str(destination_dir(cfg)),
                 "config_path": str(config_path()), "config_exists": config_path().exists(),
@@ -1428,11 +1495,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             save_config(raw)
             _print({"written": str(f), "config": new})
         else:
-            _print({"config_path": str(f), "exists": f.exists(), "config": cfg})
+            _print({"config_path": str(f), "exists": f.exists(), "config": cfg,
+                    "naming_language": naming_language(cfg), "system_language": system_language()})
     elif args.cmd == "onboarding":
         ob_data = load_onboarding()
         if not args.apply:
             _print({"version": ob_data.get("version", 1), "config_exists": config_path().exists(),
+                    "system_language": system_language(),
                     "first_time": cfg["onboarding_version"] == 0,
                     "current": cfg, "current_answers": current_answers(cfg) if cfg["onboarding_version"] else {},
                     "new_questions": new_onboarding_questions(cfg), "rounds": ob_data["rounds"]})
