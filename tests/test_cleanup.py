@@ -119,7 +119,7 @@ class MacCleanupTest(CleanupBase):
         target = self.blob("Documents/important.bin").parent
         link = self.home / "Library/Caches/link"
         link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(target)
+        self.symlink(target, link)
         self.assertFalse(any("link" in i for i in self.ids()))
         self.assertIsNotNone(organizer.check_cleanup_path(link))
 
