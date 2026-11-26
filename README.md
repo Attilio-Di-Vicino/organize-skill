@@ -13,6 +13,39 @@ Type `/organize` in [Claude Code](https://claude.com/claude-code) and it will:
 
 It works on **macOS, Windows and Linux**.
 
+## Make it yours: `~/.organize/config.json`
+
+Out of the box `/organize` empties Desktop and Downloads, sorts everything into English topic folders in Documents and offers to empty the Trash. **Every one of those choices is a setting.** Put a `config.json` in `~/.organize/` (or point `ORGANIZE_CONFIG` at one) and keep only the keys you want to change:
+
+```json
+{
+  "folders": { "desktop": "keep", "downloads": "tidy" },
+  "trash": "never",
+  "naming": { "language": "it", "case": "Title Case" },
+  "keep": ["*.lnk", "Inbox"],
+  "rules": ["Never touch files modified in the last 7 days."]
+}
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `folders` | desktop `empty`, downloads `empty`, documents `tidy` | Policy per folder: `empty` (move everything out), `tidy` (sort into sub-folders in place), `keep` (only propose clear junk), `skip` (never touch) |
+| `extra_folders` | `[]` | More folders to manage, e.g. `[{"path": "~/Pictures", "policy": "tidy"}]` |
+| `destination` | `documents` | Where sorted items go |
+| `protected` | `[]` | Paths never moved or trashed, nor anything inside them |
+| `keep` | `[]` | Name patterns never moved or trashed |
+| `trash` | `ask` | `ask` or `never` |
+| `naming` | `en`, `Title Case` | Language and case of new folder names |
+| `taxonomy` | `[]` | Your top-level topic folders (empty = Claude proposes them) |
+| `max_depth` | `3` | Deepest folder level created |
+| `batch_size` | `8` | Items per confirmation question (`1` = one by one) |
+| `advice` | `true` | End with OS tips |
+| `rules` | `[]` | Free-text rules Claude follows on every run |
+
+`folders`, `extra_folders`, `protected` and `keep` are **enforced by the script**, not just by Claude. A full example is in [`examples/config.example.json`](examples/config.example.json).
+
+You don't have to edit JSON by hand: tell Claude *"configure organize"*, or just *"never touch my Desktop"*, and it asks a few questions, shows the change and saves it with `organizer.py config --write` (which validates the file and keeps a `.bak`).
+
 ## How it works
 
 The skill has two parts:
@@ -86,13 +119,14 @@ macOS hides the Trash from apps that don't have **Full Disk Access**. Without it
 - Name clashes never overwrite: the incoming file becomes `name (2).ext`.
 - Every run is written to `~/.organize/journal/<run-id>.jsonl` before it's reported. `undo` replays it backwards.
 - Code projects are moved as a whole or not at all. Projects with virtualenvs or scheduled jobs that would break are flagged, and Claude recommends leaving them in place.
-- The script enforces the rules itself and doesn't trust the plan it is given. It refuses anything outside Desktop, Downloads and Documents, the folders themselves, hidden items (`.git`, `.ssh`…), cloud-sync roots (iCloud, OneDrive, Dropbox…), `~/.claude`, its own folder, and folders that hold installed skills. A confused or prompt-injected plan can't touch the rest of your disk.
+- The script enforces the rules itself and doesn't trust the plan it is given. It refuses anything outside the managed folders (Desktop, Downloads, Documents unless skipped, plus your `extra_folders`), the folders themselves, your `protected` paths and `keep` patterns, hidden items (`.git`, `.ssh`…), cloud-sync roots (iCloud, OneDrive, Dropbox…), `~/.claude`, its own folder, and folders that hold installed skills. A confused or prompt-injected plan can't touch the rest of your disk.
 - Symlinks are never followed. Trashing a link removes the link, never what it points to.
 
 ## Using the script directly
 
 ```bash
-python3 skills/organize/scripts/organizer.py info                 # platform, folders, trash backend
+python3 skills/organize/scripts/organizer.py info                 # platform, managed folders, trash backend
+python3 skills/organize/scripts/organizer.py config               # effective config (--init, --write FILE)
 python3 skills/organize/scripts/organizer.py scan                 # read-only inventory as JSON
 python3 skills/organize/scripts/organizer.py check-project ~/Documents/my-app
 python3 skills/organize/scripts/organizer.py apply plan.json      # [{"op": "move", "src": "...", "dst": "..."}, {"op": "trash", "src": "..."}]

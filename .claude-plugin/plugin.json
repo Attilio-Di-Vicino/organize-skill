@@ -1,8 +1,19 @@
 {
   "name": "organize",
-  "version": "1.0.0",
-  "description": "Tidy your computer with Claude Code: empty Desktop, Downloads and Trash, sort everything into topic folders in Documents. Asks before every action, every run can be undone. macOS, Windows and Linux.",
-  "author": { "name": "Attilio Di Vicino" },
+  "version": "1.1.0",
+  "description": "Tidy your computer with Claude Code, your way: choose per folder whether to empty, tidy, keep or skip it, plus naming, topic folders, protected paths and custom rules in ~/.organize/config.json. Asks before every action, every run can be undone. macOS, Windows and Linux.",
+  "author": {
+    "name": "Attilio Di Vicino"
+  },
   "license": "MIT",
-  "keywords": ["organize", "files", "cleanup", "desktop", "downloads", "trash", "productivity"]
+  "keywords": [
+    "organize",
+    "files",
+    "cleanup",
+    "desktop",
+    "downloads",
+    "trash",
+    "productivity",
+    "configurable"
+  ]
 }

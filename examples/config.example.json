@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy to ~/.organize/config.json and keep only what you want to change. Missing keys use the defaults.",
+  "folders": {
+    "desktop": "keep",
+    "downloads": "tidy",
+    "documents": "tidy"
+  },
+  "extra_folders": [
+    { "path": "~/Pictures", "policy": "tidy" }
+  ],
+  "destination": "documents",
+  "protected": ["~/Documents/Obsidian Vault"],
+  "keep": ["*.lnk", "*.desktop", "Inbox"],
+  "trash": "never",
+  "naming": { "language": "it", "case": "Title Case" },
+  "taxonomy": ["Lavoro", "Università", "Finanza", "Personale", "Progetti", "Media", "Archivio"],
+  "max_depth": 2,
+  "batch_size": 10,
+  "advice": false,
+  "rules": [
+    "Never touch files modified in the last 7 days.",
+    "PDFs from my bank go to Finanza/<year>.",
+    "Leave screenshots on the Desktop; I delete them myself."
+  ]
+}

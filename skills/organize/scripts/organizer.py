@@ -7,8 +7,9 @@ Works on macOS, Linux (freedesktop Trash) and Windows (Recycle Bin).
 Python 3.8+, standard library only.
 
 Commands:
-  info                      platform, user folders, trash backend
-  scan [paths...]           JSON inventory of top-level items (default: Desktop, Downloads, Documents)
+  info                      platform, user folders, trash backend, effective config
+  config [--init|--write F] show the effective config; create a starter file; validate+save F
+  scan [paths...]           JSON inventory of top-level items (default: every managed folder)
   check-project <path>      virtualenvs and scheduled jobs that depend on a folder's path
   apply <plan.json>         run a list of actions (mkdir / move / rename / trash)
   undo [run-id]             reverse a run (default: the last one)
@@ -19,6 +20,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -125,6 +127,150 @@ def user_folders() -> dict:
     return {k: found.get(k, v) for k, v in defaults.items()}
 
 
+# ---------- user configuration ----------
+#
+# ~/.organize/config.json (or $ORGANIZE_CONFIG) customizes the skill. Every key is
+# optional; missing keys fall back to DEFAULT_CONFIG, which reproduces the original
+# behaviour. The script enforces the path-related keys (folders, extra_folders,
+# protected, keep); the rest are preferences Claude reads via `config`.
+
+FOLDER_POLICIES = ("empty", "tidy", "keep", "skip")
+TRASH_POLICIES = ("ask", "never")
+DEFAULT_CONFIG: dict = {
+    # How to treat each standard folder:
+    #   empty -> move everything out (original behaviour for Desktop/Downloads)
+    #   tidy  -> items may stay, but sorted into sub-folders inside it
+    #   keep  -> leave items where they are; only propose clear junk (duplicates, temp…)
+    #   skip  -> don't scan it and refuse any operation inside it
+    "folders": {"desktop": "empty", "downloads": "empty", "documents": "tidy"},
+    # Where sorted items go: "documents" or an absolute / ~ path inside a managed folder.
+    "destination": "documents",
+    # Additional folders to manage, e.g. [{"path": "~/Pictures", "policy": "tidy"}].
+    # Must be inside your home folder (not the home folder itself).
+    "extra_folders": [],
+    # Paths (absolute or ~) the script never moves, renames or trashes, nor anything inside them.
+    "protected": [],
+    # Name patterns (fnmatch, case-insensitive) never moved or trashed, e.g. ["*.lnk", "Inbox"].
+    "keep": [],
+    # Trash: "ask" = offer to empty it at the end (separate confirmation); "never" = don't touch it.
+    "trash": "ask",
+    # Names of folders Claude creates.
+    "naming": {"language": "en", "case": "Title Case"},
+    # Preferred top-level topic folders. Empty = Claude proposes a taxonomy from what it finds.
+    "taxonomy": [],
+    # Deepest folder level Claude creates under the destination.
+    "max_depth": 3,
+    # How many items per confirmation batch Claude may group (1 = ask about each item).
+    "batch_size": 8,
+    # Finish with OS-specific advice.
+    "advice": True,
+    # Free-text extra rules for Claude, e.g. "Never touch files modified in the last 7 days".
+    "rules": [],
+}
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def config_path() -> Path:
+    env = os.environ.get("ORGANIZE_CONFIG")
+    return Path(env).expanduser() if env else home() / ".organize" / "config.json"
+
+
+def _expand(p: str) -> Path:
+    s = str(p)
+    if s == "~" or s.startswith("~/") or s.startswith("~\\"):
+        s = str(home()) + s[1:]
+    return Path(os.path.expandvars(s))
+
+
+def validate_config(raw) -> dict:
+    """Merge raw user config over the defaults and validate it. Raises ConfigError."""
+    if not isinstance(raw, dict):
+        raise ConfigError("config must be a JSON object")
+    unknown = set(raw) - set(DEFAULT_CONFIG) - {"$schema", "_comment"}
+    if unknown:
+        raise ConfigError(f"unknown key(s): {', '.join(sorted(unknown))}")
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    for k, v in raw.items():
+        if k in ("$schema", "_comment"):
+            continue
+        if isinstance(cfg[k], dict) and isinstance(v, dict):
+            cfg[k].update(v)
+        else:
+            cfg[k] = v
+
+    for name, pol in cfg["folders"].items():
+        if name not in ("desktop", "downloads", "documents"):
+            raise ConfigError(f"folders.{name}: only desktop, downloads, documents")
+        if pol not in FOLDER_POLICIES:
+            raise ConfigError(f"folders.{name}: policy must be one of {FOLDER_POLICIES}")
+    if cfg["trash"] not in TRASH_POLICIES:
+        raise ConfigError(f"trash must be one of {TRASH_POLICIES}")
+    for key in ("protected", "keep", "taxonomy", "rules", "extra_folders"):
+        if not isinstance(cfg[key], list):
+            raise ConfigError(f"{key} must be a list")
+    for key in ("protected", "keep", "taxonomy", "rules"):
+        if not all(isinstance(x, str) and x.strip() for x in cfg[key]):
+            raise ConfigError(f"{key} must contain non-empty strings")
+    if not isinstance(cfg["max_depth"], int) or not 1 <= cfg["max_depth"] <= 6:
+        raise ConfigError("max_depth must be an integer between 1 and 6")
+    if not isinstance(cfg["batch_size"], int) or not 1 <= cfg["batch_size"] <= 50:
+        raise ConfigError("batch_size must be an integer between 1 and 50")
+    if not isinstance(cfg["advice"], bool):
+        raise ConfigError("advice must be true or false")
+    if not isinstance(cfg["naming"], dict):
+        raise ConfigError("naming must be an object")
+
+    h = _abs(home()).resolve()
+    extras = []
+    for i, e in enumerate(cfg["extra_folders"]):
+        if isinstance(e, str):
+            e = {"path": e}
+        if not isinstance(e, dict) or not isinstance(e.get("path"), str):
+            raise ConfigError(f"extra_folders[{i}] needs a \"path\"")
+        pol = e.get("policy", "tidy")
+        if pol not in FOLDER_POLICIES:
+            raise ConfigError(f"extra_folders[{i}]: policy must be one of {FOLDER_POLICIES}")
+        p = _abs(_expand(e["path"]))
+        if not _inside(p, h) or _key(p) == _key(h):
+            raise ConfigError(f"extra_folders[{i}]: {e['path']} must be inside your home folder")
+        rel = p.parts[len(h.parts):]
+        if any(part.startswith(".") for part in rel) or (h / ".claude") == p:
+            raise ConfigError(f"extra_folders[{i}]: hidden folders can't be managed")
+        extras.append({"path": str(p), "policy": pol})
+    cfg["extra_folders"] = extras
+    return cfg
+
+
+def load_config() -> dict:
+    f = config_path()
+    if not f.exists():
+        return validate_config({})
+    try:
+        raw = json.loads(f.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ConfigError(f"{f}: invalid JSON ({e})")
+    return validate_config(raw)
+
+
+def managed_roots(cfg: Optional[dict] = None) -> List[Tuple[str, Path, str]]:
+    """(name, path, policy) of every folder the skill may operate in; skipped ones excluded."""
+    cfg = cfg or load_config()
+    out = [(k, v, cfg["folders"].get(k, "tidy")) for k, v in user_folders().items()]
+    out += [(Path(e["path"]).name, Path(e["path"]), e["policy"]) for e in cfg["extra_folders"]]
+    return [r for r in out if r[2] != "skip"]
+
+
+def destination_dir(cfg: Optional[dict] = None) -> Path:
+    cfg = cfg or load_config()
+    d = cfg["destination"]
+    if d in user_folders():
+        return user_folders()[d]
+    return _abs(_expand(d))
+
+
 RUN_ID_RE = re.compile(r"^\d{8}-\d{6}(-\d+)?$")
 CLOUD_ROOT_RE =re.compile(r"^(iCloud Drive|OneDrive.*|Dropbox.*|Google Drive.*|My Drive|Box|pCloud Drive|MEGA)$", re.I)
 
@@ -158,14 +304,32 @@ def check_path(p: Path, role: str) -> Optional[str]:
     """Enforce the safety rules in code, whatever the plan says.
 
     Returns an error message, or None when the path is allowed. Allowed: items strictly
-    inside the user's Desktop / Downloads / Documents, not hidden, not a cloud-sync root,
-    not this tool, not ~/.claude.
+    inside a managed folder (Desktop / Downloads / Documents unless the config skips them,
+    plus configured extra folders), not hidden, not a cloud-sync root, not this tool,
+    not ~/.claude, not a configured protected path, and (as a source) not matching a
+    configured keep pattern.
     """
     a = _abs(p)
-    roots = [_abs(r).resolve() for r in user_folders().values()]
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        return f"config error: {e}"
+    roots = [_abs(r).resolve() for _, r, _ in managed_roots(cfg)]
+    # most specific root first, so an extra folder nested in Documents gets its own rules
+    roots.sort(key=lambda r: len(r.parts), reverse=True)
     root = next((r for r in roots if _inside(a, r) and _key(a) != _key(r)), None)
     if root is None:
-        return f"{role} must be inside Desktop, Downloads or Documents"
+        if any(_key(a) == _key(r) for r in roots):
+            return f"{role} is a managed folder itself"
+        return f"{role} must be inside a managed folder ({', '.join(r.name for r in roots) or 'none configured'})"
+    for prot in cfg["protected"]:
+        pp = _abs(_expand(prot))
+        if _inside(a, pp) or (role == "source" and _inside(pp, a)):
+            return f"{role} is or contains a protected path ({prot})"
+    if role == "source":
+        for pat in cfg["keep"]:
+            if any(fnmatch.fnmatch(part.casefold(), pat.casefold()) for part in a.parts[len(root.parts):]):
+                return f"{role} matches keep pattern {pat!r}"
     rel = a.parts[len(root.parts):]
     if any(part.startswith(".") for part in rel):
         return f"{role} is (inside) a hidden item"
@@ -646,9 +810,14 @@ def _is_hidden(p: Path) -> bool:
 def scan(paths: List[Path], metadata: bool = True) -> List[dict]:
     items: List[dict] = []
     plat = platform_name()
+    try:
+        policies = {_key(_abs(r).resolve()): pol for _, r, pol in managed_roots()}
+    except ConfigError:
+        policies = {}
     for base in paths:
         if not base.exists():
             continue
+        policy = policies.get(_key(_abs(base).resolve()))
         try:
             entries = sorted(base.iterdir(), key=lambda p: p.name.lower())
         except PermissionError:
@@ -669,7 +838,7 @@ def scan(paths: List[Path], metadata: bool = True) -> List[dict]:
                 "ext": "" if is_dir else p.suffix.lower(),
                 "modified": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
                 "size": st.st_size, "sha1": None, "kind": None, "where_from": [],
-                "flags": flags, "duplicate_of": None,
+                "flags": flags, "duplicate_of": None, "policy": policy,
             }
             if is_dir:
                 item["size"], truncated = _dir_size(p)
@@ -710,7 +879,8 @@ def scan(paths: List[Path], metadata: bool = True) -> List[dict]:
     for group in by_hash.values():
         if len(group) < 2:
             continue
-        keeper = next((g for g in group if g["location"] == user_folders()["documents"].name), group[0])
+        dest = _key(_abs(destination_dir()).resolve())
+        keeper = next((g for g in group if _key(_abs(Path(g["path"])).resolve()).startswith(dest)), group[0])
         for g in group:
             if g is not keeper:
                 g["flags"].append("duplicate")
@@ -788,6 +958,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("info")
+    cf = sub.add_parser("config")
+    g = cf.add_mutually_exclusive_group()
+    g.add_argument("--init", action="store_true", help="write a starter config if none exists")
+    g.add_argument("--write", metavar="FILE", help="validate FILE and save it as the config")
     s = sub.add_parser("scan")
     s.add_argument("paths", nargs="*")
     s.add_argument("--no-metadata", action="store_true")
@@ -803,6 +977,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     e.add_argument("--yes-really", action="store_true")
     args = ap.parse_args(argv)
     plat = platform_name()
+    try:
+        cfg = load_config()
+    except ConfigError as ex:
+        if not (args.cmd == "config" and (args.write or args.init)):
+            _print({"error": "config", "detail": str(ex), "config_path": str(config_path())})
+            return 3
+        cfg = None
 
     if args.cmd == "info":
         trash = trash_backend()
@@ -813,11 +994,36 @@ def main(argv: Optional[List[str]] = None) -> int:
             access = False
         _print({"platform": plat, "home": str(home()),
                 "folders": {k: str(v) for k, v in user_folders().items()},
+                "managed": [{"name": n, "path": str(p), "policy": pol} for n, p, pol in managed_roots(cfg)],
+                "destination": str(destination_dir(cfg)),
+                "config_path": str(config_path()), "config_exists": config_path().exists(),
                 "trash_backend": trash.name, "trash_readable": access,
                 "journal": str(journal_dir())})
+    elif args.cmd == "config":
+        f = config_path()
+        if args.init:
+            if f.exists():
+                _print({"error": "exists", "config_path": str(f)})
+                return 1
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            _print({"written": str(f), "config": validate_config({})})
+        elif args.write:
+            try:
+                raw = json.loads(Path(args.write).read_text(encoding="utf-8"))
+                new = validate_config(raw)
+            except (ConfigError, json.JSONDecodeError, OSError) as ex:
+                _print({"error": "invalid", "detail": str(ex)})
+                return 1
+            f.parent.mkdir(parents=True, exist_ok=True)
+            if f.exists():
+                shutil.copy2(str(f), str(f.with_suffix(".json.bak")))
+            f.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            _print({"written": str(f), "config": new})
+        else:
+            _print({"config_path": str(f), "exists": f.exists(), "config": cfg})
     elif args.cmd == "scan":
-        f = user_folders()
-        paths = [Path(p).expanduser() for p in args.paths] or [f["desktop"], f["downloads"], f["documents"]]
+        paths = [Path(p).expanduser() for p in args.paths] or [r for _, r, _ in managed_roots(cfg)]
         _print(scan(paths, metadata=not args.no_metadata))
     elif args.cmd == "check-project":
         _print(check_project(Path(args.path)))
