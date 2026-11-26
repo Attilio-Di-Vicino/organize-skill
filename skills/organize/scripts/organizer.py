@@ -11,6 +11,8 @@ Commands:
   config [--init|--write F] show the effective config; create a starter file; validate+save F
   onboarding [--apply A]    print the onboarding questions; turn answers A into the config
   scan [paths...]           JSON inventory of top-level items (default: every managed folder)
+  cleanup-scan              reclaimable space outside your folders (Docker, caches, app leftovers)
+  cleanup-apply <ids.json>  clean the given cleanup-scan item ids (rescans first)
   report [--top N]          biggest files and biggest unused ones across the managed folders
   render-names <items.json> file names following the configured rename pattern (preview only)
   check-project <path>      virtualenvs and scheduled jobs that depend on a folder's path
@@ -192,6 +194,13 @@ DEFAULT_CONFIG: dict = {
     # {month} (YYYY-MM), {year}, {category}, {original} (current name without extension).
     # scope: "unclear" = only names like IMG_1234 / document (3); "all" = every file being moved.
     "rename_files": {"pattern": "", "scope": "unclear"},
+    # System cleanup outside your folders (always asked item by item or by group):
+    # categories: docker (unused images, stopped containers, build cache, unused volumes),
+    # tool (npm/pip/yarn/go/brew caches, via their own command), cache (app caches),
+    # leftover (data of apps that are no longer installed), empty (empty app-data folders).
+    # [] = off. Items smaller than min_size_mb are not listed; leftovers must be unused for
+    # leftover_min_age_days.
+    "cleanup": {"categories": [], "min_size_mb": 50, "leftover_min_age_days": 180},
     # Version of onboarding.json the user last answered (0 = never onboarded).
     "onboarding_version": 0,
 }
@@ -311,6 +320,14 @@ def validate_config(raw) -> dict:
             raise ConfigError(f"archive.{k} must be an integer >= 0 (0 = off)")
     if not isinstance(a.get("top"), int) or not 1 <= a["top"] <= 100:
         raise ConfigError("archive.top must be an integer between 1 and 100")
+    cl = cfg["cleanup"]
+    if not isinstance(cl, dict) or set(cl) - {"categories", "min_size_mb", "leftover_min_age_days"}:
+        raise ConfigError("cleanup: only categories, min_size_mb, leftover_min_age_days")
+    if not isinstance(cl.get("categories"), list) or set(cl["categories"]) - set(CLEANUP_CATEGORIES):
+        raise ConfigError(f"cleanup.categories: a list of {', '.join(CLEANUP_CATEGORIES)}")
+    for k in ("min_size_mb", "leftover_min_age_days"):
+        if not isinstance(cl.get(k), int) or isinstance(cl.get(k), bool) or cl[k] < 0:
+            raise ConfigError(f"cleanup.{k} must be an integer >= 0")
     r = cfg["rename_files"]
     if not isinstance(r, dict) or set(r) - {"pattern", "scope"}:
         raise ConfigError("rename_files: only pattern, scope")
@@ -978,8 +995,19 @@ def undo(run_id: Optional[str] = None) -> List[dict]:
             denied = check_path(Path(e["dst"]), "folder")
         elif e.get("op") == "move":
             denied = check_path(Path(e["src"]), "destination") or check_path(Path(e["dst"]), "source")
+        elif e.get("op") == "command":
+            res["status"], res["msg"] = "skipped", f"{' '.join(e.get('command') or [])} can't be undone"
+            results.append(res)
+            continue
         elif e.get("op") == "trash":
-            denied = check_path(Path(e["src"]), "destination")
+            if e.get("cleanup"):
+                p = _abs(Path(e["src"]))
+                denied = None if _key(p.parent) in {_key(_abs(r)) for v in cleanup_roots().values() for r in v} \
+                    or _key(p) in {_key(_abs(r)) for r in cleanup_roots()["cache_whole"]} \
+                    or any(_key(p) == _key(_abs(Path(t["path"]))) for t in _tool_caches(load_config()) if t.get("path")) \
+                    else "not a known cache or app-data location"
+            else:
+                denied = check_path(Path(e["src"]), "destination")
             if not denied and e.get("dst"):
                 tdir = _trash_files_dir(e.get("backend"))
                 if tdir is None or not _inside(_abs(Path(e["dst"])), _abs(tdir).resolve()):
@@ -1217,6 +1245,463 @@ def scan(paths: List[Path], metadata: bool = True) -> List[dict]:
     return items
 
 
+# ---------- system cleanup ----------
+#
+# Read-only `cleanup-scan` finds reclaimable space OUTSIDE the user's folders: Docker leftovers,
+# package-manager caches, app caches, data of apps that are no longer installed, empty folders.
+# `cleanup-apply` takes only item ids, rescans, and acts on what the fresh scan found: a plan
+# can never name an arbitrary path or command. Paths go to the Trash (undoable); tool caches
+# and Docker are cleaned with the tool's own command (permanent, but the data is re-creatable).
+
+CLEANUP_CATEGORIES = ("docker", "tool", "cache", "leftover", "empty")
+CLEANUP_WALK_LIMIT = 300000
+DOCKER_SIZE_RE = re.compile(r"([\d.]+)\s*([kKMGT]?i?B)")
+_which = shutil.which  # patched in tests
+
+# Folders that belong to the OS / desktop environment, never reported as leftovers.
+LEFTOVER_IGNORE = {
+    "macos": {"addressbook", "callhistorydb", "callhistorytransactions", "clouddocs", "crashreporter",
+              "dock", "fileprovider", "icloud", "knowledge", "mobilesync", "syncservices", "accounts",
+              "animoji", "applepushservice", "cloudkit", "dmd", "familycircle", "homeenergyd", "networkserviceproxy",
+              "quicklook", "siri", "spotlight", "contextstoreagent", "com.apple.sharedfilelist", "assistant",
+              "photos", "facetime", "maps", "messages", "music", "safari", "tv", "podcasts", "books", "news",
+              "stocks", "voicememos", "weather", "freeform", "notes", "reminders", "calendar", "mail", "keynote",
+              "pages", "numbers", "imovie", "garageband", "xcode", "claude"},
+    "linux": {"trash", "applications", "icons", "fonts", "mime", "keyrings", "gnome-shell", "dconf", "systemd",
+              "autostart", "pulse", "gtk-2.0", "gtk-3.0", "gtk-4.0", "nautilus", "flatpak", "containers", "pki",
+              "gvfs-metadata", "evolution", "tracker", "tracker3", "ibus", "menus", "kdeconnect", "plasma",
+              "kde", "kded5", "kded6", "akonadi", "baloo", "dolphin", "konsole", "kwin", "session", "xorg",
+              "recently-used.xbel", "user-dirs.dirs", "user-dirs.locale", "mimeapps.list", "monitors.xml",
+              "goa-1.0", "gnome-control-center", "gnome-settings-daemon", "enchant", "sounds", "themes",
+              "backgrounds", "wireplumber", "pipewire", "environment.d", "fontconfig", "xdg-desktop-portal",
+              "desktop-directories", "vlc", "claude", "organize", "nvim", "vim", "git", "fish", "zsh", "bash",
+              "htop", "ssh", "gnupg", "python_keyring", "keyring", "kwalletd", "nano", "less"},
+    "windows": {"microsoft", "packages", "temp", "programs", "comms", "connecteddevicesplatform", "d3dscache",
+                "crashdumps", "publishers", "microsoft_corporation", "windowsapps", "virtualstore", "history",
+                "placeholdertilelogofolder", "peerdistrepub", "fontcache", "iconcache.db", "claude", "npm",
+                "npm-cache", "pip", "python", "code", "github"},
+}
+# Common folder name -> words of the app that owns it, when they differ.
+LEFTOVER_ALIASES = {"code": ["visual studio code", "vscode"], "google": ["chrome"], "jetbrains": ["intellij", "pycharm",
+                    "webstorm", "clion", "goland", "rider", "phpstorm", "datagrip", "android studio"],
+                    "mozilla": ["firefox", "thunderbird"], "chromium": ["chromium", "chrome"],
+                    "microsoft edge": ["edge"], "bravesoftware": ["brave"], "slack": ["slack"]}
+
+
+def _parse_size(text: str) -> int:
+    m = DOCKER_SIZE_RE.search(text or "")
+    if not m:
+        return 0
+    num, unit = float(m.group(1)), m.group(2).upper().replace("I", "")
+    return int(num * {"B": 1, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}.get(unit, 1))
+
+
+def _walk_size(path: Path, limit: int = CLEANUP_WALK_LIMIT) -> Tuple[int, bool, float]:
+    """Size, truncated?, newest file modification inside (a folder's own mtime only if it has no files:
+    it changes whenever an entry is added or removed, so it says little about use)."""
+    total, count, newest = 0, 0, 0.0
+    try:
+        st = path.lstat()
+        if not path.is_dir() or path.is_symlink():
+            return st.st_size, False, max(st.st_mtime, st.st_atime)
+    except OSError:
+        return 0, False, 0.0
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+        for f in files:
+            count += 1
+            if count > limit:
+                return total, True, newest
+            try:
+                st = os.lstat(os.path.join(root, f))
+                total += st.st_size
+                newest = max(newest, st.st_mtime)
+            except OSError:
+                pass
+    return total, False, newest or st.st_mtime
+
+
+def _has_files(path: Path) -> bool:
+    for _root, _dirs, files in os.walk(path):
+        if [f for f in files if f not in SKIP_NAMES]:
+            return True
+    return False
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.casefold())
+
+
+def _local_appdata() -> Path:
+    if platform_name() == "windows" and not test_mode() and os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"])
+    return home() / "AppData" / "Local"
+
+
+def _roaming_appdata() -> Path:
+    if platform_name() == "windows" and not test_mode() and os.environ.get("APPDATA"):
+        return Path(os.environ["APPDATA"])
+    return home() / "AppData" / "Roaming"
+
+
+def cleanup_roots() -> dict:
+    """Where each kind of clutter lives on this OS: {"cache": [dirs], "leftover": [dirs]}.
+    Items are the direct children of these folders."""
+    h, plat = home(), platform_name()
+    if plat == "macos":
+        lib = h / "Library"
+        return {"cache": [lib / "Caches", lib / "Developer" / "Xcode" / "iOS DeviceSupport"],
+                "cache_whole": [lib / "Developer" / "Xcode" / "DerivedData"],
+                "leftover": [lib / "Application Support"]}
+    if plat == "windows":
+        return {"cache": [_local_appdata() / "Temp"], "cache_whole": [],
+                "leftover": [_roaming_appdata(), _local_appdata()]}
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    xdg_conf = os.environ.get("XDG_CONFIG_HOME")
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    pick = lambda env, default: Path(env) if env and not test_mode() else default
+    return {"cache": [pick(xdg_cache, h / ".cache")], "cache_whole": [],
+            "leftover": [pick(xdg_conf, h / ".config"), pick(xdg_data, h / ".local" / "share")]}
+
+
+def _never_clean() -> List[Path]:
+    h = _abs(home()).resolve()
+    out = [h / ".ssh", h / ".gnupg", h / ".claude", h / ".organize", skill_dir(),
+           h / "Library" / "Keychains", h / "Library" / "Mobile Documents", h / "Library" / "CloudStorage",
+           h / ".local" / "share" / "keyrings", _roaming_appdata() / "Microsoft", _local_appdata() / "Microsoft"]
+    return [_abs(p) for p in out]
+
+
+def check_cleanup_path(p: Path, cfg: Optional[dict] = None) -> Optional[str]:
+    """A cleanup target must be a direct child of a known cache/leftover folder (or a whole-cache
+    folder / tool cache dir), not a symlink, not a protected or sensitive location."""
+    cfg = cfg or load_config()
+    a = _abs(p)
+    if a.is_symlink():
+        return "is a symlink"
+    roots = cleanup_roots()
+    parents = [_abs(r) for r in roots["cache"] + roots["leftover"]]
+    wholes = [_abs(r) for r in roots["cache_whole"]] + [_abs(Path(t["path"])) for t in _tool_caches(cfg) if t.get("path")]
+    ok = any(_key(a.parent) == _key(r) for r in parents) or any(_key(a) == _key(w) for w in wholes)
+    if not ok:
+        return "not a known cache or app-data location"
+    for bad in _never_clean() + [_abs(_expand(x)) for x in cfg["protected"]]:
+        if _inside(a, bad) or _inside(bad, a):
+            return f"protected location ({bad.name})"
+    return None
+
+
+def _installed_apps() -> List[str]:
+    """Normalized names (and bundle ids) of installed applications."""
+    plat, names = platform_name(), set()
+    if plat == "macos":
+        dirs = [home() / "Applications"] if test_mode() else \
+            [Path("/Applications"), Path("/Applications/Utilities"), Path("/System/Applications"), home() / "Applications"]
+        for d in dirs:
+            try:
+                for app in d.iterdir():
+                    if app.suffix == ".app":
+                        names.add(_norm(app.stem))
+                        try:
+                            import plistlib
+                            with open(app / "Contents" / "Info.plist", "rb") as f:
+                                info = plistlib.load(f)
+                            for k in ("CFBundleIdentifier", "CFBundleName"):
+                                if info.get(k):
+                                    names.add(_norm(info[k]))
+                                    names.add(_norm(str(info[k]).split(".")[-1]))
+                        except Exception:
+                            pass
+            except OSError:
+                pass
+    elif plat == "windows":
+        if not test_mode():
+            try:
+                import winreg  # type: ignore
+                keys = [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                        (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall")]
+                for hive, path in keys:
+                    try:
+                        k = winreg.OpenKey(hive, path)
+                    except OSError:
+                        continue
+                    for i in range(winreg.QueryInfoKey(k)[0]):
+                        try:
+                            sub = winreg.OpenKey(k, winreg.EnumKey(k, i))
+                            for v in ("DisplayName", "Publisher"):
+                                try:
+                                    names.add(_norm(winreg.QueryValueEx(sub, v)[0]))
+                                except OSError:
+                                    pass
+                        except OSError:
+                            pass
+            except Exception:
+                pass
+        pf = [home() / "Program Files"] if test_mode() else \
+            [Path(os.environ.get(v, "")) for v in ("ProgramFiles", "ProgramFiles(x86)") if os.environ.get(v)]
+        for d in pf + [_local_appdata() / "Programs"]:
+            try:
+                names.update(_norm(x.name) for x in d.iterdir())
+            except OSError:
+                pass
+    else:
+        app_dirs = [home() / ".local" / "share" / "applications", home() / ".local" / "share" / "flatpak" / "exports" / "share" / "applications"]
+        if not test_mode():
+            app_dirs += [Path("/usr/share/applications"), Path("/usr/local/share/applications"),
+                         Path("/var/lib/flatpak/exports/share/applications"), Path("/var/lib/snapd/desktop/applications")]
+        for d in app_dirs:
+            try:
+                for f in d.glob("*.desktop"):
+                    names.add(_norm(f.stem))
+                    names.add(_norm(f.stem.split(".")[-1]))
+                    try:
+                        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                            if line.startswith(("Name=", "Exec=")):
+                                val = line.split("=", 1)[1].split()[0] if line.startswith("Exec=") else line.split("=", 1)[1]
+                                names.add(_norm(Path(val).name))
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        try:
+            names.update(_norm(x.name.split(".")[-1]) for x in (home() / ".var" / "app").iterdir())
+        except OSError:
+            pass
+    names.discard("")
+    return sorted(names)
+
+
+def _is_installed(folder_name: str, installed: List[str]) -> bool:
+    n = _norm(folder_name)
+    cands = {n, _norm(folder_name.split(".")[-1])}
+    for alias in LEFTOVER_ALIASES.get(folder_name.casefold(), []):
+        cands.add(_norm(alias))
+    for c in cands:
+        if not c:
+            continue
+        if _which(folder_name) or _which(folder_name.casefold()):
+            return True
+        for app in installed:
+            if c == app or (len(c) >= 4 and (c in app or app in c)):
+                return True
+    return False
+
+
+def _tool_caches(cfg: dict) -> List[dict]:
+    """Package-manager caches cleaned with the tool's own command."""
+    h, plat = home(), platform_name()
+    lib_caches = h / "Library" / "Caches"
+    if plat == "macos":
+        pip_dir, go_dir = lib_caches / "pip", lib_caches / "go-build"
+    elif plat == "windows":
+        pip_dir, go_dir = _local_appdata() / "pip" / "Cache", _local_appdata() / "go-build"
+    else:
+        pip_dir, go_dir = h / ".cache" / "pip", h / ".cache" / "go-build"
+    specs = [
+        ("npm", "npm cache", h / ".npm" / "_cacache" if plat != "windows" else _local_appdata() / "npm-cache",
+         ["npm", "cache", "clean", "--force"]),
+        ("pip", "pip cache", pip_dir, ["pip3" if _which("pip3") else "pip", "cache", "purge"]),
+        ("yarn", "Yarn cache", (lib_caches / "Yarn") if plat == "macos" else (h / ".cache" / "yarn"), ["yarn", "cache", "clean"]),
+        ("go", "Go build cache", go_dir, ["go", "clean", "-cache"]),
+        ("brew", "Homebrew downloads", lib_caches / "Homebrew", ["brew", "cleanup", "--prune=all"]),
+    ]
+    out = []
+    for tool, label, path, cmd in specs:
+        if tool == "brew" and plat != "macos" and not _which("brew"):
+            continue
+        if not _which(cmd[0]):
+            continue
+        out.append({"tool": tool, "label": label, "path": str(path) if path.exists() else None, "command": cmd})
+    return out
+
+
+def _docker_items() -> List[dict]:
+    if not _which("docker"):
+        return []
+    try:
+        df = _run(["docker", "system", "df", "--format", "{{json .}}"], capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        return [{"id": "docker:error", "category": "docker", "name": "Docker", "error": str(e)}]
+    if df.returncode != 0:
+        return [{"id": "docker:error", "category": "docker", "name": "Docker",
+                 "error": (df.stderr or "docker is not running").strip()[:200]}]
+    rows = {}
+    for line in df.stdout.splitlines():
+        try:
+            r = json.loads(line)
+            rows[r.get("Type", "")] = r
+        except json.JSONDecodeError:
+            pass
+    items = []
+
+    def add(id_, name, size, cmd, risk, note, count=None):
+        items.append({"id": id_, "category": "docker", "name": name, "size": size, "count": count,
+                      "action": "command", "command": cmd, "permanent": True, "risk": risk, "note": note})
+
+    try:
+        dangling = [l for l in _run(["docker", "images", "-f", "dangling=true", "--format", "{{.Size}}"],
+                                    capture_output=True, text=True, timeout=30).stdout.splitlines() if l.strip()]
+    except Exception:
+        dangling = []
+    if dangling:
+        add("docker:dangling-images", "Untagged (dangling) images", sum(_parse_size(x) for x in dangling),
+            ["docker", "image", "prune", "-f"], "low", "Leftover layers from old builds; no container uses them.", len(dangling))
+    img = rows.get("Images")
+    if img and _parse_size(img.get("Reclaimable", "")):
+        add("docker:unused-images", "All images not used by any container", _parse_size(img.get("Reclaimable", "")),
+            ["docker", "image", "prune", "-a", "-f"], "medium",
+            "They will be downloaded/built again when needed (can take time and bandwidth).")
+    cont = rows.get("Containers")
+    if cont and _parse_size(cont.get("Reclaimable", "")) or (cont and str(cont.get("TotalCount")) != str(cont.get("Active"))):
+        add("docker:stopped-containers", "Stopped containers", _parse_size(cont.get("Reclaimable", "")),
+            ["docker", "container", "prune", "-f"], "medium", "Anything saved inside a stopped container is lost.")
+    bc = rows.get("Build Cache")
+    if bc and _parse_size(bc.get("Reclaimable", "")):
+        add("docker:build-cache", "Build cache", _parse_size(bc.get("Reclaimable", "")),
+            ["docker", "builder", "prune", "-f"], "low", "Next builds will be slower once.")
+    try:
+        vols = [v.strip() for v in _run(["docker", "volume", "ls", "-f", "dangling=true", "--format", "{{.Name}}"],
+                                        capture_output=True, text=True, timeout=30).stdout.splitlines() if v.strip()]
+    except Exception:
+        vols = []
+    for v in vols:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", v):
+            add(f"docker:volume:{v}", f"Unused volume {v}", None, ["docker", "volume", "rm", v], "high",
+                "Volumes hold data (databases, uploads). Only remove if you know it's not needed.")
+    return items
+
+
+def cleanup_scan(cfg: Optional[dict] = None) -> dict:
+    cfg = cfg or load_config()
+    c = cfg["cleanup"]
+    cats = set(c["categories"])
+    min_size = c["min_size_mb"] * 1024 * 1024
+    left_age = c["leftover_min_age_days"] * 86400
+    now = datetime.now().timestamp()
+    items: List[dict] = []
+    tools = _tool_caches(cfg)
+    tool_dirs = [_abs(Path(t["path"])) for t in tools if t.get("path")]
+
+    if "docker" in cats:
+        items += [d for d in _docker_items() if d.get("error") or d.get("size") is None or d["size"] >= min_size
+                  or d["id"] == "docker:dangling-images"]
+    if "tool" in cats:
+        for t in tools:
+            size, trunc, newest = _walk_size(Path(t["path"])) if t.get("path") else (0, False, 0.0)
+            if size >= min_size:
+                items.append({"id": f"tool:{t['tool']}", "category": "tool", "name": t["label"], "path": t.get("path"),
+                              "size": size, "size_truncated": trunc, "action": "command", "command": t["command"],
+                              "permanent": True, "risk": "low", "note": "Re-downloaded automatically when needed."})
+    roots = cleanup_roots()
+    installed = _installed_apps() if "leftover" in cats else []
+    ignore = LEFTOVER_IGNORE.get(platform_name(), set())
+
+    def entries(root: Path):
+        try:
+            return sorted(root.iterdir(), key=lambda p: p.name.casefold())
+        except OSError:
+            return []
+
+    if "cache" in cats:
+        for root in roots["cache"]:
+            for e in entries(root):
+                if e.is_symlink() or e.name in SKIP_NAMES or any(_inside(_abs(e), td) or _inside(td, _abs(e)) for td in tool_dirs):
+                    continue
+                if platform_name() == "macos" and e.name.startswith("com.apple."):
+                    continue
+                if check_cleanup_path(e, cfg):
+                    continue
+                size, trunc, newest = _walk_size(e)
+                if size < min_size:
+                    continue
+                if platform_name() == "windows" and now - newest < 7 * 86400:
+                    continue     # Windows Temp: only items untouched for a week
+                items.append({"id": f"cache:{e}", "category": "cache", "name": e.name, "path": str(e), "size": size,
+                              "size_truncated": trunc, "last_used": _iso(newest) if newest else None,
+                              "action": "trash", "permanent": False, "risk": "low",
+                              "note": "App cache; the app rebuilds it. Close the app first."})
+        for w in roots["cache_whole"]:
+            if w.exists() and not check_cleanup_path(w, cfg):
+                size, trunc, newest = _walk_size(w)
+                if size >= min_size:
+                    items.append({"id": f"cache:{w}", "category": "cache", "name": w.name, "path": str(w), "size": size,
+                                  "size_truncated": trunc, "last_used": _iso(newest) if newest else None,
+                                  "action": "trash", "permanent": False, "risk": "low", "note": "Build cache; rebuilt on next build."})
+
+    if cats & {"leftover", "empty"}:
+        for root in roots["leftover"]:
+            for e in entries(root):
+                if (not e.is_dir() or e.is_symlink() or e.name.startswith(".") or e.name in SKIP_NAMES
+                        or e.name.casefold() in ignore or _norm(e.name) in {_norm(x) for x in ignore}
+                        or check_cleanup_path(e, cfg)):
+                    continue
+                if platform_name() == "macos" and e.name.startswith("com.apple."):
+                    continue
+                if any(_key(_abs(e)) == _key(_abs(r)) for r in roots["cache"]):
+                    continue
+                if "empty" in cats and not _has_files(e):
+                    items.append({"id": f"empty:{e}", "category": "empty", "name": e.name, "path": str(e), "size": 0,
+                                  "action": "trash", "permanent": False, "risk": "low", "note": "Empty folder."})
+                    continue
+                if "leftover" not in cats or _is_installed(e.name, installed):
+                    continue
+                size, trunc, newest = _walk_size(e)
+                if left_age and now - newest < left_age:
+                    continue
+                items.append({"id": f"leftover:{e}", "category": "leftover", "name": e.name, "path": str(e),
+                              "size": size, "size_truncated": trunc, "last_used": _iso(newest) if newest else None,
+                              "action": "trash", "permanent": False, "risk": "medium",
+                              "note": "No installed app matches this name (best guess). May hold settings or data."})
+    items.sort(key=lambda i: (CLEANUP_CATEGORIES.index(i["category"]), -(i.get("size") or 0)))
+    return {"categories": sorted(cats, key=CLEANUP_CATEGORIES.index), "min_size_mb": c["min_size_mb"],
+            "total_size": sum(i.get("size") or 0 for i in items), "items": items}
+
+
+def cleanup_apply(ids: List[str]) -> Tuple[str, List[dict]]:
+    """Clean the given item ids. Only ids present in a fresh scan are acted on."""
+    cfg = json.loads(json.dumps(load_config()))
+    # rescan exactly the categories the ids belong to (they may come from a one-off --categories scan)
+    cfg["cleanup"]["categories"] = sorted({i.split(":", 1)[0] for i in ids} & set(CLEANUP_CATEGORIES))
+    fresh = {i["id"]: i for i in cleanup_scan(cfg)["items"] if not i.get("error")}
+    run_id = _new_run_id()
+    results: List[dict] = []
+    trash = trash_backend()
+    with (journal_dir() / f"{run_id}.jsonl").open("a", encoding="utf-8") as jf:
+        def log(entry):
+            jf.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            jf.flush()
+        for id_ in ids:
+            item = fresh.get(id_)
+            res = {"id": id_, "status": "ok", "msg": ""}
+            if item is None:
+                res["status"], res["msg"] = "error", "not found in a fresh scan (already cleaned, or not a cleanup item)"
+                results.append(res)
+                continue
+            try:
+                if item["action"] == "trash":
+                    p = Path(item["path"])
+                    denied = check_cleanup_path(p, cfg)
+                    if denied:
+                        res["status"], res["msg"] = "error", f"refused: {denied}"
+                    else:
+                        info = trash.put(_abs(p))
+                        log({"op": "trash", "cleanup": True, "backend": trash.name, "src": str(_abs(p)), **info})
+                        res["msg"] = "moved to the Trash"
+                else:
+                    cp = _run(item["command"], capture_output=True, text=True, timeout=1800)
+                    out = ((cp.stdout or "") + (cp.stderr or "")).strip()
+                    log({"op": "command", "id": id_, "command": item["command"], "returncode": cp.returncode})
+                    if cp.returncode != 0:
+                        res["status"] = "error"
+                    res["msg"] = out[-400:]
+            except Exception as e:
+                res["status"], res["msg"] = "error", str(e)
+            res["freed_estimate"] = item.get("size")
+            results.append(res)
+    return run_id, results
+
+
 # ---------- big & forgotten files ----------
 
 def report(top: Optional[int] = None) -> dict:
@@ -1434,6 +1919,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     s = sub.add_parser("scan")
     s.add_argument("paths", nargs="*")
     s.add_argument("--no-metadata", action="store_true")
+    cs = sub.add_parser("cleanup-scan")
+    cs.add_argument("--categories", help="comma-separated subset to scan (default: config)")
+    ca = sub.add_parser("cleanup-apply")
+    ca.add_argument("ids", help="JSON file: list of item ids from cleanup-scan")
     rp = sub.add_parser("report")
     rp.add_argument("--top", type=int)
     rn = sub.add_parser("render-names")
@@ -1524,6 +2013,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.cmd == "scan":
         paths = [Path(p).expanduser() for p in args.paths] or [r for _, r, _ in managed_roots(cfg)]
         _print(scan(paths, metadata=not args.no_metadata))
+    elif args.cmd == "cleanup-scan":
+        if args.categories:
+            cats = [x.strip() for x in args.categories.split(",") if x.strip()]
+            bad = set(cats) - set(CLEANUP_CATEGORIES)
+            if bad:
+                _print({"error": f"unknown categories: {', '.join(sorted(bad))}"})
+                return 1
+            cfg = json.loads(json.dumps(cfg))
+            cfg["cleanup"]["categories"] = cats
+        _print(cleanup_scan(cfg))
+    elif args.cmd == "cleanup-apply":
+        try:
+            ids = json.loads(Path(args.ids).read_text(encoding="utf-8"))
+            if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+                raise ValueError("expected a JSON list of ids")
+        except (ValueError, OSError) as ex:
+            _print({"error": str(ex)})
+            return 1
+        run_id, results = cleanup_apply(ids)
+        _print({"run_id": run_id, "results": results})
     elif args.cmd == "report":
         _print(report(args.top))
     elif args.cmd == "render-names":

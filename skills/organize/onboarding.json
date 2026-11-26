@@ -21,7 +21,7 @@
     "  since     onboarding version that introduced the question (users onboarded earlier are told",
     "            new options exist; they are only asked if they request a new onboarding)"
   ],
-  "version": 3,
+  "version": 4,
   "rounds": [
     {
       "id": "folders",
@@ -368,7 +368,7 @@
     },
     {
       "id": "files",
-      "intro": "Now about the files themselves.",
+      "intro": "Now about the files themselves, and clutter elsewhere on the computer.",
       "questions": [
         {
           "id": "rename",
@@ -476,6 +476,49 @@
               "label": "No",
               "set": {
                 "archive.large_mb": 0
+              }
+            }
+          ]
+        },
+        {
+          "id": "cleanup",
+          "since": 4,
+          "header": "Cleanup",
+          "question": "Should I also look for clutter outside your folders (Docker, caches, leftovers of uninstalled apps)? I'd ask before removing anything.",
+          "options": [
+            {
+              "id": "all",
+              "label": "Yes, everything",
+              "description": "Docker, package and app caches, leftovers of old apps, empty folders",
+              "set": {
+                "cleanup.categories": [
+                  "docker",
+                  "tool",
+                  "cache",
+                  "leftover",
+                  "empty"
+                ]
+              }
+            },
+            {
+              "id": "safe",
+              "label": "Only Docker and caches",
+              "description": "Things that are rebuilt automatically",
+              "set": {
+                "cleanup.categories": [
+                  "docker",
+                  "tool",
+                  "cache",
+                  "empty"
+                ]
+              }
+            },
+            {
+              "id": "no",
+              "label": "No",
+              "description": "Only tidy my folders",
+              "set": {
+                "cleanup.categories": []
               }
             }
           ]

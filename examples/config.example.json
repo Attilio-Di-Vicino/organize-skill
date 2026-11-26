@@ -53,6 +53,16 @@
     "pattern": "{date} - {title}",
     "scope": "unclear"
   },
+  "cleanup": {
+    "categories": [
+      "docker",
+      "tool",
+      "cache",
+      "empty"
+    ],
+    "min_size_mb": 100,
+    "leftover_min_age_days": 180
+  },
   "rules": [
     "Never touch files modified in the last 7 days.",
     "PDFs from my bank go to Finanza/<year>.",

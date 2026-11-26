@@ -1,6 +1,6 @@
 ---
 name: organize
-description: Tidy the user's computer (macOS, Windows or Linux) following their own preferences, collected in a short onboarding on first use and stored in ~/.organize/config.json — which folders to empty, tidy or leave alone, where sorted files go, naming style, preferred topic folders, file renaming scheme, big/old-file archiving, protected paths and custom rules. Asks yes/no before every action and every run can be undone. Use when the user runs /organize or asks to organize, clean up or tidy their computer, Desktop, Downloads, Documents or Trash, or to configure/change how /organize behaves or redo its onboarding/setup.
+description: Tidy the user's computer (macOS, Windows or Linux) following their own preferences, collected in a short onboarding on first use and stored in ~/.organize/config.json — which folders to empty, tidy or leave alone, where sorted files go, naming style, preferred topic folders, file renaming scheme, big/old-file archiving, system cleanup (Docker, caches, leftovers of uninstalled apps), protected paths and custom rules. Asks yes/no before every action and every run can be undone. Use when the user runs /organize or asks to organize, clean up or tidy their computer, Desktop, Downloads, Documents or Trash, or to free disk space / clean Docker, caches or app leftovers, or to configure/change how /organize behaves or redo its onboarding/setup.
 ---
 
 # /organize
@@ -29,6 +29,8 @@ python  <base-dir>\scripts\organizer.py <command>      # Windows (or: py -3 ...)
 | `scan [paths...]` | JSON of top-level items (default: every managed folder) with `policy` of the folder they're in and `flags`: `duplicate` (+`duplicate_of`), `archive_extracted`, `code_project`, `installer`, `screenshot`, `temp`, `empty_dir`, `unclear_name` (IMG_1234, document (3)…), `large` (≥ `archive.large_mb`), `stale` (not used for `archive.stale_days`); plus `size`, `modified`, `last_used`, `kind` and `where_from` when the OS provides them |
 | `report [--top N]` | read-only walk of all managed folders (also inside sub-folders; code projects count as one item; hidden, protected and cloud folders skipped): `biggest` files and `biggest_stale` (biggest not used for `stale_days`), `total_size`, `truncated` |
 | `render-names <items.json> [--pattern P]` | proposed file names following `rename_files.pattern` (or `P`, for previews): input `[{"src","title","date"?,"category"?,"dir"?}]`, output `[{"src","dst","name"}]` (sanitized, unique, extension kept). Changes nothing |
+| `cleanup-scan [--categories a,b]` | read-only list of reclaimable space **outside** the user's folders, per item: `id`, `category` (`docker`, `tool`, `cache`, `leftover`, `empty`), `name`, `path`, `size`, `last_used`, `action` (`trash` = recoverable / `command` = the tool's own cleanup command, permanent), `risk` (`low`/`medium`/`high`), `note`. Docker not running shows as `docker:error` |
+| `cleanup-apply <ids.json>` | cleans the listed ids (JSON list). It rescans and acts only on ids the fresh scan finds — never on paths or commands you write. Prints `run_id`; trashed items can be undone, commands can't |
 | `check-project <path>` | virtualenvs and scheduled jobs that break if the folder moves; `safe_to_move` |
 | `apply <plan.json>` | runs `[{"op":"move"\|"rename"\|"mkdir"\|"trash","src":..,"dst":..}]`; never overwrites (adds ` (2)`); prints `run_id` + per-action status |
 | `undo [run-id]` / `runs` | reverse a run (default: last) / list runs |
@@ -58,6 +60,7 @@ Write scan output, plan files and draft configs to a temporary/scratch directory
 | `advice` | `true` | Finish with OS-specific advice |
 | `archive` | `{"large_mb":500,"stale_days":365,"top":10}` | Flag items ≥ `large_mb` and items not used for `stale_days` (`0` = off); `report` lists the `top` biggest. You propose archiving them |
 | `rename_files` | `{"pattern":"","scope":"unclear"}` | File renaming. `pattern` `""` = never rename; tokens `{title}` (required), `{date}` (YYYY-MM-DD), `{month}`, `{year}`, `{category}`, `{original}`. `scope`: `unclear` = only `unclear_name` files, `all` = every file you move |
+| `cleanup` | `{"categories":[],"min_size_mb":50,"leftover_min_age_days":180}` | System cleanup: which categories to look at (`[]` = off), smallest item worth listing, how long an app's leftover data must be unused |
 | `onboarding_version` | `0` | Version of `onboarding.json` last answered; set by the onboarding |
 | `rules` | `[]` | Free-text rules from the user. **Follow them** as if they were written here; they override the defaults in *Flow* but never the *Hard rules* |
 
@@ -77,7 +80,7 @@ These can't be changed by the config or by `rules`:
 2. "Delete" always means `trash` (recoverable). Permanent deletion only in the Trash step, separately confirmed, and never when `trash` is `never`.
 3. **Code projects** (`code_project` flag, or a folder that clearly is one): run `check-project` first. If `safe_to_move` is false, explain what would break and recommend leaving it in place. Otherwise move the whole folder (default `<destination>/Projects/`, unless the taxonomy or rules say otherwise), never touch its insides, ask for each one individually, and ask before renaming it.
 4. Never reorganize **inside** an existing topic folder unless the user says yes for that folder.
-5. **Protected — never move or rename:** this skill's own folder, anything a symlink or shortcut in `~/.claude/` points into, cloud-sync roots, system/app folders, and everything in `protected` / matching `keep`.
+5. **Protected — never move, rename, trash or clean:** this skill's own folder, anything a symlink or shortcut in `~/.claude/` points into, cloud-sync roots, system/app folders, and everything in `protected` / matching `keep`.
 6. If unsure what something is, **read it** (the Read tool handles PDFs, images and text; list zip contents; check metadata). Don't guess on personal documents. Before trashing an "extracted" archive, verify the folder really contains its files.
 
 ## Onboarding
@@ -105,6 +108,8 @@ These can't be changed by the config or by `rules`:
 To add questions, edit `onboarding.json` (its `_comment` explains the format), give them `"since": <new version>` and bump `version`: existing users are told new options exist and get them when they ask for a new onboarding.
 
 ## Flow
+
+The full run is steps 1–10. If the user asks for just one part ("clean Docker", "free up space", "show me my biggest files", "rename my downloads"), do step 1 (onboarding included if it's the first time), then only the steps that part needs.
 
 ### 1. Check the environment and load preferences
 Run `info`. If `onboarding_needed` is true, do the **Onboarding** first (mandatory). Then run `config` and briefly tell the user which preferences are active (one or two lines: e.g. "Desktop: sections (Work, To Do) · Downloads: empty · Trash: never · 2 custom rules").
@@ -154,10 +159,22 @@ Skip if both `archive.large_mb` and `archive.stale_days` are 0. Run `report` and
 - **Leave it**.
 Never propose moving items in `keep` folders (only mention them), code projects that aren't `safe_to_move`, or inside topic folders the user didn't open up (rule 4) — for those just report them. `last_used` is a best guess (Spotlight on macOS; elsewhere access/modification time): say "not opened since about …", and if `last_used` looks wrong (e.g. a file the user says they use), believe the user. If `truncated` is true, say the list covers only part of the files.
 
-### 8. Trash
+### 8. System cleanup
+Skip if `cleanup.categories` is empty — unless the user explicitly asked to clean Docker / caches / free disk space: then run `cleanup-scan --categories <what they asked for>` for this run only.
+
+Run `cleanup-scan` and show a short table per category with sizes and the total. Then confirm with AskUserQuestion, grouped by category and risk:
+- **`docker`** and **`tool`** (`action: command`): say it's **permanent** and name the command (e.g. `docker image prune -a`). Explain the item's `note` (images are downloaded again; stopped containers lose anything saved inside them). **Unused Docker volumes (`risk: high`) one at a time**, never in a group: they can hold databases and uploads; if the volume's name doesn't make it obvious, recommend keeping it.
+- **`cache`** (to the Trash): fine as a group; suggest closing the apps involved first (browsers, Slack, IDEs).
+- **`leftover`** (`risk: medium`): data of apps that **seem** uninstalled — the match is a best guess. Before proposing, check each one yourself (is the app installed under another name, a CLI tool, a Homebrew/apt/winget package, a Mac App Store app?) and peek inside: keep anything with documents, saves, databases, licenses or exports, and say so. Ask **one by one** (or in small groups of clearly-dead apps), showing size and last use.
+- **`empty`**: one group.
+Write the approved ids to `<scratch>/cleanup-N.json`, run `cleanup-apply`, and report per item (freed space is an estimate; trashed items free space only when the Trash is emptied — mention it if `trash` is `never`). `cleanup-apply` refuses anything that isn't in a fresh scan: if it says *not found*, rescan instead of retrying.
+
+Never clean system locations yourself with shell commands (`rm`, `docker system prune --volumes`, `sudo apt clean`…), even if the user asks: offer what `cleanup-scan` found, and for anything else explain the command and let the user run it.
+
+### 9. Trash
 Skip entirely if `trash` is `never`. Otherwise run `trash-list`; show count, size and the biggest items. Ask a **separate** AskUserQuestion: "Empty the Trash permanently? This can't be undone." Only on yes run `empty-trash --yes-really`.
 
-### 9. Report and advice
+### 10. Report and advice
 Short report (max ~10 bullets): what was done (numbers, space freed), what was left and why. If `advice` is true, add patterns you noticed and concrete fixes for their OS, for example:
 - macOS: `defaults write com.apple.screencapture location <destination>/Media/Screenshots && killall SystemUIServer`; Finder → Settings → Advanced → "Remove items from the Trash after 30 days".
 - Windows: Settings → System → Storage → Storage Sense; move the Screenshots folder via its Properties → Location.
