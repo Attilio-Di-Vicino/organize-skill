@@ -1,6 +1,6 @@
 ---
 name: organize
-description: Tidy the user's computer (macOS, Windows or Linux) following their own preferences, collected in a short onboarding on first use and stored in ~/.organize/config.json — which folders to empty, tidy or leave alone, where sorted files go, naming style, preferred topic folders, protected paths and custom rules. Asks yes/no before every action and every run can be undone. Use when the user runs /organize or asks to organize, clean up or tidy their computer, Desktop, Downloads, Documents or Trash, or to configure/change how /organize behaves or redo its onboarding/setup.
+description: Tidy the user's computer (macOS, Windows or Linux) following their own preferences, collected in a short onboarding on first use and stored in ~/.organize/config.json — which folders to empty, tidy or leave alone, where sorted files go, naming style, preferred topic folders, file renaming scheme, big/old-file archiving, protected paths and custom rules. Asks yes/no before every action and every run can be undone. Use when the user runs /organize or asks to organize, clean up or tidy their computer, Desktop, Downloads, Documents or Trash, or to configure/change how /organize behaves or redo its onboarding/setup.
 ---
 
 # /organize
@@ -18,13 +18,15 @@ python  <base-dir>\scripts\organizer.py <command>      # Windows (or: py -3 ...)
 
 | Command | What it does |
 |---|---|
-| `info` | platform, managed folders with their policy, destination, config path, trash backend, whether the trash is readable |
+| `info` | platform, managed folders with their policy, destination, config path, `onboarding_needed`, `onboarding_new_questions`, trash backend, whether the trash is readable |
 | `config` | the effective configuration (user file merged over defaults) |
 | `config --init` | write a starter `~/.organize/config.json` with the defaults (fails if one exists) |
-| `onboarding` | the onboarding questions (from `onboarding.json`) and the current config |
+| `onboarding` | the onboarding questions (from `onboarding.json`), `first_time`, the current config, `current_answers` (which option each question currently corresponds to) and `new_questions` |
 | `onboarding --apply <answers.json> [--dry-run]` | turn onboarding answers into the config (merged over the existing one, `.bak` kept); `--dry-run` only prints the result |
 | `config --write <file>` | validate `<file>` and save it as the config (previous one kept as `config.json.bak`); prints the error and changes nothing if invalid |
-| `scan [paths...]` | JSON of top-level items (default: every managed folder) with `policy` of the folder they're in and `flags`: `duplicate` (+`duplicate_of`), `archive_extracted`, `code_project`, `installer`, `screenshot`, `temp`, `empty_dir`; plus `size`, `modified`, `kind` and `where_from` when the OS provides them |
+| `scan [paths...]` | JSON of top-level items (default: every managed folder) with `policy` of the folder they're in and `flags`: `duplicate` (+`duplicate_of`), `archive_extracted`, `code_project`, `installer`, `screenshot`, `temp`, `empty_dir`, `unclear_name` (IMG_1234, document (3)…), `large` (≥ `archive.large_mb`), `stale` (not used for `archive.stale_days`); plus `size`, `modified`, `last_used`, `kind` and `where_from` when the OS provides them |
+| `report [--top N]` | read-only walk of all managed folders (also inside sub-folders; code projects count as one item; hidden, protected and cloud folders skipped): `biggest` files and `biggest_stale` (biggest not used for `stale_days`), `total_size`, `truncated` |
+| `render-names <items.json> [--pattern P]` | proposed file names following `rename_files.pattern` (or `P`, for previews): input `[{"src","title","date"?,"category"?,"dir"?}]`, output `[{"src","dst","name"}]` (sanitized, unique, extension kept). Changes nothing |
 | `check-project <path>` | virtualenvs and scheduled jobs that break if the folder moves; `safe_to_move` |
 | `apply <plan.json>` | runs `[{"op":"move"\|"rename"\|"mkdir"\|"trash","src":..,"dst":..}]`; never overwrites (adds ` (2)`); prints `run_id` + per-action status |
 | `undo [run-id]` / `runs` | reverse a run (default: last) / list runs |
@@ -52,6 +54,8 @@ Write scan output, plan files and draft configs to a temporary/scratch directory
 | `max_depth` | `3` | Deepest folder level you create under the destination |
 | `batch_size` | `8` | Max items per confirmation question (`1` = ask about every item) |
 | `advice` | `true` | Finish with OS-specific advice |
+| `archive` | `{"large_mb":500,"stale_days":365,"top":10}` | Flag items ≥ `large_mb` and items not used for `stale_days` (`0` = off); `report` lists the `top` biggest. You propose archiving them |
+| `rename_files` | `{"pattern":"","scope":"unclear"}` | File renaming. `pattern` `""` = never rename; tokens `{title}` (required), `{date}` (YYYY-MM-DD), `{month}`, `{year}`, `{category}`, `{original}`. `scope`: `unclear` = only `unclear_name` files, `all` = every file you move |
 | `onboarding_version` | `0` | Version of `onboarding.json` last answered; set by the onboarding |
 | `rules` | `[]` | Free-text rules from the user. **Follow them** as if they were written here; they override the defaults in *Flow* but never the *Hard rules* |
 
@@ -76,33 +80,34 @@ These can't be changed by the config or by `rules`:
 
 ## Onboarding
 
-Runs **before the first organization** (when `info` says `onboarding_needed: true`), or whenever the user asks to set up / redo the onboarding ("/organize setup", "rifai l'onboarding", "change my preferences from scratch").
+- **First time: mandatory.** When `info` says `onboarding_needed: true` (never onboarded, even if a config file was written by hand), do the onboarding before anything else. Don't scan, propose or change anything until it's saved. If the user wants to skip it, explain in one line that it takes a minute and decides what /organize may touch; if they still refuse, stop — don't organize with guessed preferences.
+- **Afterwards: only on request.** Never start it on your own. The user asks for it ("/organize setup", "rifai l'onboarding", "cambia le mie preferenze"). They may redo **all** of it or **only a part** ("rifai solo la parte delle cartelle", "change how files are named"): then ask only the matching round(s) or questions, plus their follow-ups. Answers you don't ask again stay as they are (the script merges over the current config and evaluates `when` against it).
+- **New questions** (`onboarding_new_questions` non-empty, after an update of the skill): don't ask them. At the end of the run, mention in one line that new options exist (name them in plain words) and that the user can say "rifai l'onboarding" to set them; until then their defaults apply.
 
 1. Say in one line that you'll ask a few quick questions so /organize works the way they like, and that nothing on their computer changes during the onboarding.
 2. Run `onboarding`. It returns `rounds`, each with up to 4 `questions`. For each round, in order:
    - keep only questions whose `when` matches earlier answers (a list in `when` means any of those answers); skip the round if none is left;
-   - ask them in **one** AskUserQuestion call: `header` → header, `question` → question, each option's `label`/`description` → option label/description. **Translate everything into the user's language.** If the user already has a config (re-run), put the option matching their current setting first and add " (current)" to its label;
-   - map each reply to the option `id`. If the user typed their own answer ("Other"), pick the option it means; if it's a list of names or paths, use the option with `values_to` and pass the list. If it means something no option covers, keep it to add as a free-text rule.
-   - For options with `values_to` (e.g. "I'll name them") the user may already have typed the values in "Other"; if not, ask them in plain text right after the round.
+   - ask them in **one** AskUserQuestion call: `header` → header, `question` → question, each option's `label`/`description` → option label/description. **Translate everything into the user's language.** On a re-run (`first_time` false), put the option in `current_answers` first and add " (current)" to its label;
+   - map each reply to the option `id`. If the user typed their own answer ("Other"), pick the option it means; if it's a list of names or paths, use the option with `values_to` and pass the list; if it's a description for an option with `text_to`, pass the text. If it means something no option covers, keep it to add as a free-text rule.
+   - For options with `values_to` / `text_to` (e.g. "I'll name them", "My own scheme") the user may already have typed the value in "Other"; if not, ask in plain text right after the round.
+   - **Custom rename scheme** (`text_to: rename_files.pattern`): turn the user's description into a pattern with the tokens `{title}` (required), `{date}`, `{month}`, `{year}`, `{category}`, `{original}`, e.g. "anno, categoria e titolo" → `{year} - {category} - {title}`. Show a sample name (`render-names --pattern` on any file, or just write one) and confirm it with the user.
 3. Write `<scratch>/answers.json`:
-   `{"desktop": "sections", "desktop_sections": {"option": "custom", "values": ["Work", "To Do"]}, "trash": "never", ..., "_user_language": "<ISO code of the language you're speaking>"}`.
+   `{"desktop": "sections", "desktop_sections": {"option": "custom", "values": ["Work", "To Do"]}, "rename": {"option": "custom", "text": "{year} - {title}"}, "trash": "never", ..., "_user_language": "<ISO code of the language you're speaking>"}`. On a partial re-run, include only the questions you asked.
    Answers that only fit as free text go into the `rules` question: `"rules": {"option": "yes", "values": [...]}`.
 4. Run `onboarding --apply <scratch>/answers.json --dry-run`. If it reports `invalid`, explain the problem in plain words and ask the one question needed to fix it — e.g. a folder set to *Empty* while *Documents* is *Don't touch* leaves nowhere to put the files: offer "Documents: only remove junk" (files can still arrive there) or changing the other folder — then retry.
 5. Show a short recap in the user's language (one line per folder, Trash, names, confirmations, protected paths, rules) and ask with AskUserQuestion: `Save` / `Change something`. On *Save* run `onboarding --apply <scratch>/answers.json` (no `--dry-run`). On *Change something*, ask only the questions they want to change and repeat from step 4.
 6. Confirm it's saved, mention they can say "configure organize" for single changes or redo the onboarding any time, then continue with the Flow (unless they only asked for setup).
 
-If `onboarding_needed` is true but `config_exists` is also true, the onboarding file got new questions since their last run: ask only the questions whose `id` isn't reflected in their config (in doubt, ask the whole onboarding and mark current values).
-
-To add questions, edit `onboarding.json` (its `_comment` explains the format) and bump its `version`: users get asked again at their next run.
+To add questions, edit `onboarding.json` (its `_comment` explains the format), give them `"since": <new version>` and bump `version`: existing users are told new options exist and get them when they ask for a new onboarding.
 
 ## Flow
 
 ### 1. Check the environment and load preferences
-Run `info`. If `onboarding_needed` is true, do the **Onboarding** first. Then run `config` and briefly tell the user which preferences are active (one or two lines: e.g. "Desktop: sections (Work, To Do) · Downloads: empty · Trash: never · 2 custom rules").
+Run `info`. If `onboarding_needed` is true, do the **Onboarding** first (mandatory). Then run `config` and briefly tell the user which preferences are active (one or two lines: e.g. "Desktop: sections (Work, To Do) · Downloads: empty · Trash: never · 2 custom rules").
 If `trash` is `ask` and `trash_readable` is false, tell the user in one line how to fix it (macOS: System Settings → Privacy & Security → Full Disk Access → enable the app running Claude Code, then restart it).
 
 ### 2. Scan
-Run `scan > <scratch>/scan.json`, then summarize: counts per folder (with its policy), duplicates, extracted archives, installers, temp files, code projects, space that can be freed. Peek inside folders whose name says nothing.
+Run `scan > <scratch>/scan.json`, then summarize: counts per folder (with its policy), duplicates, extracted archives, installers, temp files, code projects, unclear names, big and long-unused items, space that can be freed. Peek inside folders whose name says nothing.
 
 ### 3. Destination structure
 Look at the existing top-level folders in the destination (peek inside ambiguous ones). Propose a taxonomy using the configured `naming`:
@@ -120,6 +125,12 @@ For every item decide one of:
 
 Apply the user's `rules` here. Use names, `kind`, `where_from`, dates and file contents. Group related files across folders.
 
+**New names.** If `rename_files.pattern` is set, for every file you'll move that is in scope (`unclear` → only `unclear_name` files; `all` → every moved file):
+- work out a short descriptive `title` in the configured naming language (read the file if the name doesn't say: an invoice → "Bolletta Enel Novembre"), the document's own `date` if it has one (invoice date, photo date in the name or metadata; otherwise leave it out and the file's modification date is used) and the `category` (its topic folder);
+- run `render-names <scratch>/names.json` with `"dir"` set to the destination folder, and use each returned `dst` as the move destination — one `move` does both;
+- in the confirmation, show `old name → new name` for each file.
+Files that stay where they are (`tidy` folders) can get a `rename` in place with the same procedure; never rename in `keep` folders, inside code projects, or anything you're not sure about (ask). The script never overwrites: a taken name becomes `name (2).ext`.
+
 ### 5. Confirm in batches
 Group items by destination (or by trash reason), at most `batch_size` items per group. Use AskUserQuestion, up to 4 questions per call, one question per group, listing the files and the proposed action. Options:
 - `Yes` — do it
@@ -127,24 +138,33 @@ Group items by destination (or by trash reason), at most `batch_size` items per 
 - `Let me choose one by one` — split the group into individual questions next round
 (The user can always type a different destination — honor it. If an answer is ambiguous about part of a group, do only the clear part and ask again about the rest.)
 
-Start with the obvious batches (duplicates, temp files, installers, extracted archives) so the count drops fast.
+Start with the obvious batches (duplicates, temp files, installers, extracted archives) so the count drops fast. For renames add a 4th option `Move, keep the old names` when it makes sense.
 
 ### 6. Apply
 Write only the approved actions to `<scratch>/plan-N.json`, run `apply`, and report: moved / trashed / skipped / errors (explain any `refused:` using the config), renamed-on-clash items, the `run_id`, and how to undo ("say 'undo'"). Repeat 4–6 until every `empty` folder is empty (or holds only what the user chose to keep) and every `tidy` folder is sorted.
 
-### 7. Trash
+### 7. Big and forgotten files
+Skip if both `archive.large_mb` and `archive.stale_days` are 0. Run `report` and show, in one short table each: the biggest files (`biggest`, with size and last use) and the biggest ones not used for `stale_days` (`biggest_stale`); also the total size. Then propose, per group of similar items, with AskUserQuestion:
+- **Archive** — move to `<destination>/<Archive folder>` (named with the configured naming, e.g. `Archive`/`Archivio`; keep the original sub-path or topic inside it, e.g. `Archivio/Università/…`), for long-unused things worth keeping;
+- **Trash** — only for things that are clearly junk (old installers, a downloaded ISO, a duplicate), with the reason;
+- **Leave it**.
+Never propose moving items in `keep` folders (only mention them), code projects that aren't `safe_to_move`, or inside topic folders the user didn't open up (rule 4) — for those just report them. `last_used` is a best guess (Spotlight on macOS; elsewhere access/modification time): say "not opened since about …", and if `last_used` looks wrong (e.g. a file the user says they use), believe the user. If `truncated` is true, say the list covers only part of the files.
+
+### 8. Trash
 Skip entirely if `trash` is `never`. Otherwise run `trash-list`; show count, size and the biggest items. Ask a **separate** AskUserQuestion: "Empty the Trash permanently? This can't be undone." Only on yes run `empty-trash --yes-really`.
 
-### 8. Report and advice
+### 9. Report and advice
 Short report (max ~10 bullets): what was done (numbers, space freed), what was left and why. If `advice` is true, add patterns you noticed and concrete fixes for their OS, for example:
 - macOS: `defaults write com.apple.screencapture location <destination>/Media/Screenshots && killall SystemUIServer`; Finder → Settings → Advanced → "Remove items from the Trash after 30 days".
 - Windows: Settings → System → Storage → Storage Sense; move the Screenshots folder via its Properties → Location.
 - Linux: GNOME Settings → Privacy → File History & Trash → auto-delete; set the screenshot folder in the screenshot tool.
 
+If `onboarding_new_questions` is non-empty, add one line about the new options (see *Onboarding*).
+
 If during the run the user repeatedly made the same choice (e.g. always "No, leave it" for the Desktop, always a certain destination for a file type), offer in one line to save it to their config.
 
 ## Configure
-For a full re-setup, run the **Onboarding** again. For single changes — when the user asks to configure /organize, change its rules, or says something like "never touch my Desktop", "don't empty the Trash", "use Italian folder names", "always leave .lnk files":
+For a full or partial re-setup, run the **Onboarding** again (only when the user asks). For single changes — when the user asks to configure /organize, change its rules, or says something like "never touch my Desktop", "don't empty the Trash", "use Italian folder names", "always leave .lnk files":
 1. Run `config` to get the current settings.
 2. Make just the change they asked for (ask a clarifying question only if it's ambiguous).
 3. Write the full new config (only the keys that differ from the defaults, plus any existing ones) to `<scratch>/config.json`, show the user the diff in plain words, and on yes run `config --write <scratch>/config.json`. If it reports `invalid`, fix it and retry.

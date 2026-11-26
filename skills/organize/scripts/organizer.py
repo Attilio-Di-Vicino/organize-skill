@@ -11,6 +11,8 @@ Commands:
   config [--init|--write F] show the effective config; create a starter file; validate+save F
   onboarding [--apply A]    print the onboarding questions; turn answers A into the config
   scan [paths...]           JSON inventory of top-level items (default: every managed folder)
+  report [--top N]          biggest files and biggest unused ones across the managed folders
+  render-names <items.json> file names following the configured rename pattern (preview only)
   check-project <path>      virtualenvs and scheduled jobs that depend on a folder's path
   apply <plan.json>         run a list of actions (mkdir / move / rename / trash)
   undo [run-id]             reverse a run (default: the last one)
@@ -23,6 +25,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import heapq
 import json
 import os
 import re
@@ -51,6 +54,18 @@ SCREENSHOT_RE = re.compile(
     r"Capture d.écran|Bildschirmfoto|Captura de pantalla)[ _\-]",
     re.I,
 )
+REPORT_WALK_LIMIT = 200000
+# Names that say nothing about the content: camera/scanner/download defaults, "(1)" copies, ids.
+UNCLEAR_NAME_RE = re.compile(
+    r"^(?:(?:IMG|DSC|DSCN|DCIM|PXL|VID|MOV|MVIMG|WP|PANO|GOPR|Scan|Scansione|Document|Documento|"
+    r"Doc|File|Download|Untitled|Untitled document|Senza titolo|Unnamed|Image|Immagine|Photo|Foto|"
+    r"New|Nuovo|Copy|Copia|Attachment|Allegato)?[\s_\-.]*[\d\s_\-.()]*"
+    r"|WhatsApp (?:Image|Video|Audio)[\d\s_\-.()]*(?:at[\d\s_\-.()]*)?"
+    r"|[0-9a-f]{8,}(?:-[0-9a-f]{4,})*)$",
+    re.I,
+)
+NAME_TOKENS = ("title", "date", "month", "year", "category", "original")
+WIN_RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM\d|LPT\d)(\..*)?$", re.I)
 SKIP_NAMES = {".DS_Store", ".localized", "desktop.ini", "Thumbs.db", ".directory"}
 WIN_FOLDER_KEYS = {
     "desktop": "Desktop",
@@ -169,6 +184,13 @@ DEFAULT_CONFIG: dict = {
     "advice": True,
     # Free-text extra rules for Claude, e.g. "Never touch files modified in the last 7 days".
     "rules": [],
+    # Big and forgotten files: flag items >= large_mb and items not used for stale_days
+    # (0 disables either); `report` lists the `top` biggest files. Claude proposes archiving them.
+    "archive": {"large_mb": 500, "stale_days": 365, "top": 10},
+    # Renaming files. pattern "" = never rename. Tokens: {title} (required), {date} (YYYY-MM-DD),
+    # {month} (YYYY-MM), {year}, {category}, {original} (current name without extension).
+    # scope: "unclear" = only names like IMG_1234 / document (3); "all" = every file being moved.
+    "rename_files": {"pattern": "", "scope": "unclear"},
     # Version of onboarding.json the user last answered (0 = never onboarded).
     "onboarding_version": 0,
 }
@@ -224,6 +246,30 @@ def validate_config(raw) -> dict:
         raise ConfigError("max_depth must be an integer between 1 and 6")
     if not isinstance(cfg["batch_size"], int) or not 1 <= cfg["batch_size"] <= 50:
         raise ConfigError("batch_size must be an integer between 1 and 50")
+    a = cfg["archive"]
+    if not isinstance(a, dict) or set(a) - {"large_mb", "stale_days", "top"}:
+        raise ConfigError("archive: only large_mb, stale_days, top")
+    for k in ("large_mb", "stale_days"):
+        if not isinstance(a.get(k), int) or isinstance(a.get(k), bool) or a[k] < 0:
+            raise ConfigError(f"archive.{k} must be an integer >= 0 (0 = off)")
+    if not isinstance(a.get("top"), int) or not 1 <= a["top"] <= 100:
+        raise ConfigError("archive.top must be an integer between 1 and 100")
+    r = cfg["rename_files"]
+    if not isinstance(r, dict) or set(r) - {"pattern", "scope"}:
+        raise ConfigError("rename_files: only pattern, scope")
+    if r.get("scope") not in ("unclear", "all"):
+        raise ConfigError("rename_files.scope must be 'unclear' or 'all'")
+    pat = r.get("pattern")
+    if not isinstance(pat, str):
+        raise ConfigError("rename_files.pattern must be a string")
+    if pat:
+        bad = set(re.findall(r"{(\w*)}", pat)) - set(NAME_TOKENS)
+        if bad:
+            raise ConfigError(f"rename_files.pattern: unknown token(s) {', '.join('{%s}' % b for b in sorted(bad))}")
+        if "{title}" not in pat:
+            raise ConfigError("rename_files.pattern must contain {title}")
+        if "/" in pat or "\\" in pat:
+            raise ConfigError("rename_files.pattern can't contain / or \\")
     if not isinstance(cfg["onboarding_version"], int) or cfg["onboarding_version"] < 0:
         raise ConfigError("onboarding_version must be a non-negative integer")
     if not isinstance(cfg["advice"], bool):
@@ -327,6 +373,49 @@ def _matches(when: Optional[dict], answers: dict) -> bool:
     return True
 
 
+def _get_dotted(cfg: dict, dotted: str):
+    d = cfg
+    for part in dotted.split("."):
+        if not isinstance(d, dict) or part not in d:
+            return None
+        d = d[part]
+    return d
+
+
+def current_answers(cfg: dict) -> dict:
+    """Which onboarding option the (validated) config currently corresponds to, per question.
+    Used to mark "(current)" options and to evaluate `when` for questions not re-asked."""
+    out = {}
+    for r in load_onboarding()["rounds"]:
+        for q in r["questions"]:
+            chosen = None
+            for o in q["options"]:          # 1. options whose `set` matches the config exactly
+                sets = o.get("set") or {}
+                if sets and all(_get_dotted(cfg, k) == v or (v == "$user_language" and _get_dotted(cfg, k) != "en")
+                                for k, v in sets.items()):
+                    chosen = o["id"]
+                    break
+            if chosen is None:              # 2. free-text options whose target is filled
+                for o in q["options"]:
+                    tgt = o.get("values_to") or o.get("text_to")
+                    if tgt and _get_dotted(cfg, tgt):
+                        chosen = o["id"]
+                        break
+            if chosen is None:              # 3. an option that sets nothing ("propose", "no")
+                chosen = next((o["id"] for o in q["options"]
+                               if not o.get("set") and not o.get("values_to") and not o.get("text_to")), None)
+            if chosen is not None:
+                out[q["id"]] = chosen
+    return out
+
+
+def new_onboarding_questions(cfg: dict) -> List[str]:
+    done = cfg["onboarding_version"]
+    if done == 0:
+        return []
+    return [q["id"] for r in load_onboarding()["rounds"] for q in r["questions"] if q.get("since", 1) > done]
+
+
 def _set_dotted(cfg: dict, dotted: str, value) -> None:
     parts = dotted.split(".")
     d = cfg
@@ -354,9 +443,14 @@ def onboarding_to_config(answers: dict, base: Optional[dict] = None) -> dict:
     unknown = set(answers) - set(questions) - {"_user_language"}
     if unknown:
         raise ConfigError(f"unknown onboarding question(s): {', '.join(sorted(unknown))}")
+    try:
+        context = current_answers(validate_config(raw))
+    except ConfigError:
+        context = {}
+    context.update({k: v for k, v in answers.items() if k != "_user_language"})
     for r in ob["rounds"]:
         for q in r["questions"]:
-            if q["id"] not in answers or not _matches(q.get("when"), answers):
+            if q["id"] not in answers or not _matches(q.get("when"), context):
                 continue
             a = answers[q["id"]]
             opt_id, values = (a.get("option"), a.get("values")) if isinstance(a, dict) else (a, None)
@@ -369,6 +463,11 @@ def onboarding_to_config(answers: dict, base: Optional[dict] = None) -> dict:
                 if not isinstance(values, list) or not values:
                     raise ConfigError(f"{q['id']}: option {opt_id!r} needs \"values\" (a list)")
                 _set_dotted(raw, opt["values_to"], [str(v).strip() for v in values if str(v).strip()])
+            if opt.get("text_to"):
+                text = a.get("text") if isinstance(a, dict) else None
+                if not isinstance(text, str) or not text.strip():
+                    raise ConfigError(f"{q['id']}: option {opt_id!r} needs \"text\" (a string)")
+                _set_dotted(raw, opt["text_to"], text.strip())
     # a folder that's no longer "tidy" drops its sections
     for f in (raw.get("folders") or {}).values():
         if isinstance(f, dict) and f.get("policy") != "tidy":
@@ -861,25 +960,50 @@ def _sha1(path: Path) -> Optional[str]:
 
 
 def _dir_size(path: Path) -> Tuple[int, bool]:
-    total, count = 0, 0
+    size, truncated, _ = _dir_stats(path)
+    return size, truncated
+
+
+def _dir_stats(path: Path) -> Tuple[int, bool, float]:
+    """Total size, whether the walk was cut short, and the newest file use (atime/mtime) inside."""
+    total, count, newest = 0, 0, 0.0
     for root, dirs, files in os.walk(path):
         for f in files:
             count += 1
             if count > SIZE_WALK_LIMIT:
-                return total, True
+                return total, True, newest
             try:
-                total += os.lstat(os.path.join(root, f)).st_size
+                st = os.lstat(os.path.join(root, f))
+                total += st.st_size
+                newest = max(newest, st.st_mtime, st.st_atime)
             except OSError:
                 pass
-    return total, False
+    return total, False, newest
+
+
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts).isoformat(timespec="seconds")
+
+
+def _last_used(st, inner_newest: float = 0.0) -> float:
+    """Best guess of when an item was last opened: newest of atime, mtime (and contents for folders).
+    atime can be coarse (relatime, or disabled on Windows), so it errs towards "recent"."""
+    return max(st.st_mtime, st.st_atime, inner_newest)
 
 
 def _mdls(path: Path) -> Tuple[Optional[str], List[str]]:
+    kind, froms, _ = _mdls_full(path)
+    return kind, froms
+
+
+def _mdls_full(path: Path) -> Tuple[Optional[str], List[str], Optional[float]]:
+    """kind, where-from URLs and Spotlight's last-opened date (macOS)."""
     try:
-        out = _run(["mdls", "-name", "kMDItemKind", "-name", "kMDItemWhereFroms", str(path)],
+        out = _run(["mdls", "-name", "kMDItemKind", "-name", "kMDItemWhereFroms",
+                    "-name", "kMDItemLastUsedDate", str(path)],
                    capture_output=True, text=True, timeout=5).stdout
     except Exception:
-        return None, []
+        return None, [], None
     kind = None
     m = re.search(r'kMDItemKind\s*=\s*"([^"]*)"', out)
     if m:
@@ -888,7 +1012,14 @@ def _mdls(path: Path) -> Tuple[Optional[str], List[str]]:
     m = re.search(r"kMDItemWhereFroms\s*=\s*\((.*?)\)", out, re.S)
     if m:
         froms = re.findall(r'"([^"]*)"', m.group(1))
-    return kind, froms
+    used = None
+    m = re.search(r"kMDItemLastUsedDate\s*=\s*(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ([+-]\d{4})", out)
+    if m:
+        try:
+            used = datetime.strptime(m.group(1) + " " + m.group(2), "%Y-%m-%d %H:%M:%S %z").timestamp()
+        except ValueError:
+            used = None
+    return kind, froms, used
 
 
 def _windows_zone_url(path: Path) -> List[str]:
@@ -927,9 +1058,13 @@ def scan(paths: List[Path], metadata: bool = True) -> List[dict]:
     items: List[dict] = []
     plat = platform_name()
     try:
-        policies = {_key(_abs(r).resolve()): pol for _, r, pol in managed_roots()}
+        cfg = load_config()
+        policies = {_key(_abs(r).resolve()): pol for _, r, pol in managed_roots(cfg)}
     except ConfigError:
-        policies = {}
+        cfg, policies = validate_config({}), {}
+    large = cfg["archive"]["large_mb"] * 1024 * 1024
+    stale_days = cfg["archive"]["stale_days"]
+    now = datetime.now().timestamp()
     for base in paths:
         if not base.exists():
             continue
@@ -955,9 +1090,11 @@ def scan(paths: List[Path], metadata: bool = True) -> List[dict]:
                 "modified": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
                 "size": st.st_size, "sha1": None, "kind": None, "where_from": [],
                 "flags": flags, "duplicate_of": None, "policy": policy,
+                "last_used": None,
             }
+            inner_newest = 0.0
             if is_dir:
-                item["size"], truncated = _dir_size(p)
+                item["size"], truncated, inner_newest = _dir_stats(p)
                 if truncated:
                     item["size_truncated"] = True
                 if _is_code_project(p):
@@ -980,11 +1117,21 @@ def scan(paths: List[Path], metadata: bool = True) -> List[dict]:
                         flags.append("archive_extracted")
             if SCREENSHOT_RE.match(p.name):
                 flags.append("screenshot")
+            elif not is_dir and UNCLEAR_NAME_RE.match(p.stem if p.suffix else p.name):
+                flags.append("unclear_name")
+            used = _last_used(st, inner_newest)
             if metadata and not test_mode():
                 if plat == "macos":
-                    item["kind"], item["where_from"] = _mdls(p)
+                    item["kind"], item["where_from"], spot = _mdls_full(p)
+                    if spot:
+                        used = max(spot, st.st_mtime)   # Spotlight knows real opens; atime may not
                 elif plat == "windows" and not is_dir:
                     item["where_from"] = _windows_zone_url(p)
+            item["last_used"] = _iso(used)
+            if large and item["size"] >= large:
+                flags.append("large")
+            if stale_days and now - used >= stale_days * 86400:
+                flags.append("stale")
             items.append(item)
 
     # identical files: keep the copy that already lives in Documents (or the first seen)
@@ -1002,6 +1149,143 @@ def scan(paths: List[Path], metadata: bool = True) -> List[dict]:
                 g["flags"].append("duplicate")
                 g["duplicate_of"] = keeper["path"]
     return items
+
+
+# ---------- big & forgotten files ----------
+
+def report(top: Optional[int] = None) -> dict:
+    """Biggest files (code projects count as one item) across the managed folders, and the
+    biggest ones not used for `stale_days`. Read-only; hidden items, cloud-sync roots and
+    protected paths are not walked."""
+    cfg = load_config()
+    top = top or cfg["archive"]["top"]
+    stale_s = cfg["archive"]["stale_days"] * 86400
+    now = datetime.now().timestamp()
+    protected = [_abs(_expand(x)) for x in cfg["protected"]]
+    biggest: list = []
+    stale: list = []
+    seen = 0
+    truncated = False
+    total = 0
+
+    def push(heap, entry):
+        item = (entry["size"], entry["path"], entry)
+        if len(heap) < top:
+            heapq.heappush(heap, item)
+        elif item[:2] > heap[0][:2]:
+            heapq.heapreplace(heap, item)
+
+    def add(path: Path, size: int, used: float, kind: str, root_name: str):
+        nonlocal total
+        total += size
+        e = {"path": str(path), "size": size, "last_used": _iso(used), "kind": kind, "location": root_name}
+        push(biggest, e)
+        if stale_s and now - used >= stale_s:
+            push(stale, e)
+
+    for name, root, _ in managed_roots(cfg):
+        if not root.exists():
+            continue
+        for cur, dirs, files in os.walk(root):
+            curp = Path(cur)
+            keep_dirs = []
+            for d in sorted(dirs):
+                dp = curp / d
+                if (_is_hidden(dp) or dp.is_symlink() or any(_inside(dp, pp) for pp in protected)
+                        or (curp == root and CLOUD_ROOT_RE.match(d))):
+                    continue
+                if _is_code_project(dp):
+                    size, _, newest = _dir_stats(dp)
+                    try:
+                        add(dp, size, _last_used(dp.lstat(), newest), "code_project", root.name)
+                    except OSError:
+                        pass
+                    continue
+                keep_dirs.append(d)
+            dirs[:] = keep_dirs
+            for f in files:
+                seen += 1
+                if seen > REPORT_WALK_LIMIT:
+                    truncated = True
+                    break
+                fp = curp / f
+                if _is_hidden(fp) or any(_inside(fp, pp) for pp in protected):
+                    continue
+                try:
+                    st = fp.lstat()
+                except OSError:
+                    continue
+                add(fp, st.st_size, _last_used(st), "file", root.name)
+            if truncated:
+                break
+        if truncated:
+            break
+
+    def done(heap):
+        return [e for _, _, e in sorted(heap, key=lambda t: t[:2], reverse=True)]
+
+    return {"top": top, "large_mb": cfg["archive"]["large_mb"], "stale_days": cfg["archive"]["stale_days"],
+            "files_scanned": seen, "total_size": total, "truncated": truncated,
+            "biggest": done(biggest), "biggest_stale": done(stale)}
+
+
+# ---------- file names ----------
+
+def _clean_name(s: str) -> str:
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", s)
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"(?:\s*-\s*){2,}", " - ", s)          # "a -  - b" left by an empty token
+    s = re.sub(r"(?:\s*_\s*){2,}", "_", s)
+    s = re.sub(r"\(\s*\)|\[\s*\]", "", s)
+    return s.strip(" -_.")
+
+
+def render_name(pattern: str, src: Path, fields: dict) -> str:
+    """File name for `src` following `pattern`. fields: title (required), date
+    (YYYY-MM-DD / YYYY-MM / YYYY; default: file's modification date), category."""
+    title = _clean_name(str(fields.get("title") or ""))
+    if not title:
+        raise ValueError("missing title")
+    date = str(fields.get("date") or "")
+    if date and not re.fullmatch(r"\d{4}(-\d\d(-\d\d)?)?", date):
+        raise ValueError(f"bad date {date!r} (use YYYY-MM-DD, YYYY-MM or YYYY)")
+    if not date:
+        date = datetime.fromtimestamp(src.lstat().st_mtime).strftime("%Y-%m-%d")
+    values = {"title": title, "date": date, "month": date[:7] if len(date) >= 7 else date,
+              "year": date[:4], "category": _clean_name(str(fields.get("category") or "")),
+              "original": _clean_name(src.stem if src.suffix else src.name)}
+    stem = _clean_name(re.sub(r"{(\w+)}", lambda m: values.get(m.group(1), ""), pattern))
+    stem = stem[:120].rstrip(" -_.") or title[:120]
+    if WIN_RESERVED.match(stem):
+        stem += "_"
+    return stem + (src.suffix if src.suffix else "")
+
+
+def render_names(items: List[dict], pattern: Optional[str] = None) -> List[dict]:
+    """Proposed renames for a batch, without touching anything. Names are unique within the
+    batch and against existing files; the plan still goes through `apply` (and its checks)."""
+    pattern = pattern if pattern is not None else load_config()["rename_files"]["pattern"]
+    if not pattern:
+        raise ConfigError("renaming is off (rename_files.pattern is empty)")
+    validate_config({"rename_files": {"pattern": pattern, "scope": "unclear"}})
+    out, planned = [], set()
+    for it in items:
+        try:
+            src = _abs(Path(it["src"]))
+            if src.is_dir():
+                raise ValueError("only files are renamed")
+            if not src.exists():
+                raise ValueError("no such file")
+            folder = _abs(_expand(it["dir"])) if it.get("dir") else src.parent
+            name = render_name(pattern, src, it)
+            dst = folder / name
+            if _key(dst) != _key(src):
+                dst = unique_dest(dst, taken=lambda q: _key(q) in planned)
+            planned.add(_key(dst))
+            out.append({"src": str(src), "dst": str(dst), "name": dst.name, "unchanged": _key(dst) == _key(src)})
+        except (ValueError, KeyError, OSError) as e:
+            out.append({"src": it.get("src"), "error": str(e)})
+    return out
 
 
 # ---------- project safety ----------
@@ -1084,6 +1368,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     s = sub.add_parser("scan")
     s.add_argument("paths", nargs="*")
     s.add_argument("--no-metadata", action="store_true")
+    rp = sub.add_parser("report")
+    rp.add_argument("--top", type=int)
+    rn = sub.add_parser("render-names")
+    rn.add_argument("items", help="JSON file: [{src, title, date?, category?, dir?}]")
+    rn.add_argument("--pattern", help="override rename_files.pattern (for previews)")
     c = sub.add_parser("check-project")
     c.add_argument("path")
     a = sub.add_parser("apply")
@@ -1116,7 +1405,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "managed": [{"name": n, "path": str(p), "policy": pol} for n, p, pol in managed_roots(cfg)],
                 "destination": str(destination_dir(cfg)),
                 "config_path": str(config_path()), "config_exists": config_path().exists(),
-                "onboarding_needed": cfg["onboarding_version"] < int(load_onboarding().get("version", 1)),
+                "onboarding_needed": cfg["onboarding_version"] == 0,
+                "onboarding_new_questions": new_onboarding_questions(cfg),
                 "trash_backend": trash.name, "trash_readable": access,
                 "journal": str(journal_dir())})
     elif args.cmd == "config":
@@ -1143,7 +1433,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         ob_data = load_onboarding()
         if not args.apply:
             _print({"version": ob_data.get("version", 1), "config_exists": config_path().exists(),
-                    "current": cfg, "rounds": ob_data["rounds"]})
+                    "first_time": cfg["onboarding_version"] == 0,
+                    "current": cfg, "current_answers": current_answers(cfg) if cfg["onboarding_version"] else {},
+                    "new_questions": new_onboarding_questions(cfg), "rounds": ob_data["rounds"]})
             return 0
         base = {}
         if config_path().exists():
@@ -1163,6 +1455,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.cmd == "scan":
         paths = [Path(p).expanduser() for p in args.paths] or [r for _, r, _ in managed_roots(cfg)]
         _print(scan(paths, metadata=not args.no_metadata))
+    elif args.cmd == "report":
+        _print(report(args.top))
+    elif args.cmd == "render-names":
+        try:
+            items = json.loads(Path(args.items).read_text(encoding="utf-8"))
+            _print(render_names(items, args.pattern))
+        except (ConfigError, json.JSONDecodeError, OSError) as ex:
+            _print({"error": str(ex)})
+            return 1
     elif args.cmd == "check-project":
         _print(check_project(Path(args.path)))
     elif args.cmd == "apply":

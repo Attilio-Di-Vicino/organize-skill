@@ -5,6 +5,8 @@ Type `/organize` in [Claude Code](https://claude.com/claude-code) and it will:
 
 - empty your **Desktop**, **Downloads** and **Trash / Recycle Bin**
 - sort everything into **topic folders** in Documents (`Finance`, `Work`, `University`, `Projects`, `Media`…) with English, Title Case names
+- **rename files with unclear names** (`IMG_1234.jpg`, `document (3).pdf`) with your scheme, e.g. `2026-11-03 - Electricity Bill.pdf`
+- show your **biggest and long-forgotten files** and offer to archive them
 - work out what to **keep and what to throw away**: identical duplicates, zips you already extracted, installers for apps you already have, Office lock files, half-finished downloads
 - **ask yes/no before every action**, in batches, from the terminal
 - leave your code projects working: before moving a project it checks for virtualenvs and scheduled jobs that would break
@@ -15,7 +17,7 @@ It works on **macOS, Windows and Linux**.
 
 ## First run: a quick onboarding
 
-The first time you run `/organize`, before touching anything, Claude asks a few multiple-choice questions in the chat:
+The first time you run `/organize`, before touching anything, Claude asks a few multiple-choice questions in the chat. This first onboarding is **required**: nothing is scanned or changed until it's saved.
 
 ```
 ? How do you want your Desktop?          › Empty · In sections · Only remove junk · Don't touch it
@@ -24,12 +26,17 @@ The first time you run `/organize`, before touching anything, Claude asks a few 
 ? What should happen to the Trash?       › Offer to empty it · Never touch it
 ? Which sections do you want on the Desktop?  › Propose them · In progress / To read / Archive · I'll name them
 ? In which language should new folders be named? …  ? Group confirmations or file by file? …
+? Should I rename files with unclear names?    › Keep their names · Date - Title · Title - Date · My own scheme
+? Suggest archiving files you haven't opened in… › 6 months · 1 year · 2 years · Never
+? Point out the files taking the most space?   › Over 100 MB · Over 500 MB · Over 1 GB · No
 ? Is there a folder I must never touch? …  ? Any rule of your own? …
 ```
 
-It shows a recap, and on *Save* writes your answers to `~/.organize/config.json`. Say *"redo the organize onboarding"* any time to change them.
+It shows a recap, and on *Save* writes your answers to `~/.organize/config.json`.
 
-**Adding questions:** they live in [`skills/organize/onboarding.json`](skills/organize/onboarding.json). Each option says which config keys it sets (`"set": {"folders.desktop.policy": "tidy"}`) or which list receives what the user types (`"values_to": "rules"`), and a question can depend on earlier answers (`"when": {"desktop": "sections"}`). Bump `version` and existing users are asked again at their next run. The tests check that every option produces a valid config.
+After that it's **only on request**: say *"redo the organize onboarding"* to answer everything again, or *"redo just the folders part"* / *"change how files are renamed"* to answer only some questions; the rest of your settings stay as they are, and your current choices are marked *(current)*. When an update of the skill adds new questions, `/organize` just tells you new options exist; it asks them only when you request a new onboarding.
+
+**Adding questions:** they live in [`skills/organize/onboarding.json`](skills/organize/onboarding.json). Each option says which config keys it sets (`"set": {"folders.desktop.policy": "tidy"}`) or which list receives what the user types (`"values_to": "rules"`), and a question can depend on earlier answers (`"when": {"desktop": "sections"}`). Mark new questions with `"since": <version>` and bump `version`: existing users are told about them and get them at their next requested onboarding. The tests check that every option produces a valid config.
 
 ## Make it yours: `~/.organize/config.json`
 
@@ -57,6 +64,8 @@ Out of the box `/organize` empties Desktop and Downloads, sorts everything into 
 | `taxonomy` | `[]` | Your top-level topic folders (empty = Claude proposes them) |
 | `max_depth` | `3` | Deepest folder level created |
 | `batch_size` | `8` | Items per confirmation question (`1` = one by one) |
+| `archive` | `large_mb` 500, `stale_days` 365, `top` 10 | Flag big files and files not opened for that long (`0` = off); Claude offers to archive them |
+| `rename_files` | `pattern` `""`, `scope` `unclear` | Rename scheme with `{title}`, `{date}`, `{month}`, `{year}`, `{category}`, `{original}` (`""` = never rename); `scope` `unclear` (only `IMG_1234`-style names) or `all` (every moved file) |
 | `advice` | `true` | End with OS tips |
 | `rules` | `[]` | Free-text rules Claude follows on every run |
 
@@ -147,6 +156,8 @@ python3 skills/organize/scripts/organizer.py info                 # platform, ma
 python3 skills/organize/scripts/organizer.py config               # effective config (--init, --write FILE)
 python3 skills/organize/scripts/organizer.py onboarding           # onboarding questions (--apply answers.json [--dry-run])
 python3 skills/organize/scripts/organizer.py scan                 # read-only inventory as JSON
+python3 skills/organize/scripts/organizer.py report               # biggest and long-unused files (read-only)
+python3 skills/organize/scripts/organizer.py render-names items.json --pattern "{date} - {title}"   # preview new names
 python3 skills/organize/scripts/organizer.py check-project ~/Documents/my-app
 python3 skills/organize/scripts/organizer.py apply plan.json      # [{"op": "move", "src": "...", "dst": "..."}, {"op": "trash", "src": "..."}]
 python3 skills/organize/scripts/organizer.py runs

@@ -37,7 +37,12 @@ class OnboardingTest(TmpHome):
                 for o in q["options"]:
                     answers = {k: v for k, v in (q.get("when") or {}).items()}
                     answers = {k: (v[0] if isinstance(v, list) else v) for k, v in answers.items()}
-                    answers[q["id"]] = {"option": o["id"], "values": ["Alpha", "Beta"]} if o.get("values_to") else o["id"]
+                    if o.get("values_to"):
+                        answers[q["id"]] = {"option": o["id"], "values": ["Alpha", "Beta"]}
+                    elif o.get("text_to"):
+                        answers[q["id"]] = {"option": o["id"], "text": "{year} {title}"}
+                    else:
+                        answers[q["id"]] = o["id"]
                     if q["id"] == "documents" and o["id"] == "skip":
                         answers.update(desktop="sections", downloads="junk_only")
                     with self.subTest(q=q["id"], o=o["id"]):
@@ -98,3 +103,49 @@ class OnboardingTest(TmpHome):
         self.assertEqual(code, 0, out)
         code, _ = self.cli("config")
         self.assertEqual(code, 0)
+
+    # first time is mandatory, later only on request
+
+    def test_manual_config_without_onboarding_still_needs_it(self):
+        (self.home / ".organize").mkdir()
+        (self.home / ".organize/config.json").write_text(json.dumps({"trash": "never"}))
+        _, info = self.cli("info")
+        self.assertTrue(info["onboarding_needed"])
+
+    def test_new_questions_are_announced_not_forced(self):
+        (self.home / ".organize").mkdir()
+        (self.home / ".organize/config.json").write_text(json.dumps({"onboarding_version": 1}))
+        _, info = self.cli("info")
+        self.assertFalse(info["onboarding_needed"])
+        self.assertIn("rename", info["onboarding_new_questions"])
+        self.assertNotIn("desktop", info["onboarding_new_questions"])
+
+    def test_current_answers_reflect_config(self):
+        _, out = self.apply({"desktop": "sections",
+                             "desktop_sections": {"option": "custom", "values": ["A"]},
+                             "trash": "never", "rename": "title_first", "stale": "2y",
+                             "language": "mine", "_user_language": "it"})
+        _, ob = self.cli("onboarding")
+        cur = ob["current_answers"]
+        self.assertEqual(cur["desktop"], "sections")
+        self.assertEqual(cur["desktop_sections"], "custom")
+        self.assertEqual(cur["trash"], "never")
+        self.assertEqual(cur["rename"], "title_first")
+        self.assertEqual(cur["stale"], "2y")
+        self.assertEqual(cur["language"], "mine")
+        self.assertEqual(cur["protected"], "no")
+
+    def test_partial_rerun_uses_config_for_conditions(self):
+        self.apply({"desktop": "sections"})
+        # only the follow-up is re-asked: its `when` is satisfied by the saved config
+        _, out = self.apply({"desktop_sections": {"option": "custom", "values": ["Inbox", "Done"]}})
+        self.assertEqual(out["config"]["folders"]["desktop"]["sections"], ["Inbox", "Done"])
+        self.assertEqual(out["config"]["folders"]["desktop"]["policy"], "tidy")
+
+    def test_custom_rename_pattern(self):
+        code, out = self.apply({"rename": {"option": "custom", "text": "{year} {category} {title}"},
+                                "rename_scope": "all"})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["config"]["rename_files"], {"pattern": "{year} {category} {title}", "scope": "all"})
+        code, out = self.apply({"rename": {"option": "custom", "text": "{when} {title}"}})
+        self.assertEqual(code, 1)
