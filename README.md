@@ -13,6 +13,24 @@ Type `/organize` in [Claude Code](https://claude.com/claude-code) and it will:
 
 It works on **macOS, Windows and Linux**.
 
+## First run: a quick onboarding
+
+The first time you run `/organize`, before touching anything, Claude asks a few multiple-choice questions in the chat:
+
+```
+? How do you want your Desktop?          › Empty · In sections · Only remove junk · Don't touch it
+? How do you want your Downloads folder? › Empty · In sections · Only remove junk · Don't touch it
+? How do you want your Documents folder? › Topic folders · Only remove junk · Don't touch it
+? What should happen to the Trash?       › Offer to empty it · Never touch it
+? Which sections do you want on the Desktop?  › Propose them · In progress / To read / Archive · I'll name them
+? In which language should new folders be named? …  ? Group confirmations or file by file? …
+? Is there a folder I must never touch? …  ? Any rule of your own? …
+```
+
+It shows a recap, and on *Save* writes your answers to `~/.organize/config.json`. Say *"redo the organize onboarding"* any time to change them.
+
+**Adding questions:** they live in [`skills/organize/onboarding.json`](skills/organize/onboarding.json). Each option says which config keys it sets (`"set": {"folders.desktop.policy": "tidy"}`) or which list receives what the user types (`"values_to": "rules"`), and a question can depend on earlier answers (`"when": {"desktop": "sections"}`). Bump `version` and existing users are asked again at their next run. The tests check that every option produces a valid config.
+
 ## Make it yours: `~/.organize/config.json`
 
 Out of the box `/organize` empties Desktop and Downloads, sorts everything into English topic folders in Documents and offers to empty the Trash. **Every one of those choices is a setting.** Put a `config.json` in `~/.organize/` (or point `ORGANIZE_CONFIG` at one) and keep only the keys you want to change:
@@ -29,7 +47,7 @@ Out of the box `/organize` empties Desktop and Downloads, sorts everything into 
 
 | Key | Default | What it does |
 |---|---|---|
-| `folders` | desktop `empty`, downloads `empty`, documents `tidy` | Policy per folder: `empty` (move everything out), `tidy` (sort into sub-folders in place), `keep` (only propose clear junk), `skip` (never touch) |
+| `folders` | desktop `empty`, downloads `empty`, documents `tidy` | Policy per folder: `empty` (move everything out), `tidy` (sort into sub-folders in place), `keep` (only propose clear junk), `skip` (never touch). For `tidy` you can fix the sections: `{"policy": "tidy", "sections": ["In Progress", "Archive"]}` |
 | `extra_folders` | `[]` | More folders to manage, e.g. `[{"path": "~/Pictures", "policy": "tidy"}]` |
 | `destination` | `documents` | Where sorted items go |
 | `protected` | `[]` | Paths never moved or trashed, nor anything inside them |
@@ -127,6 +145,7 @@ macOS hides the Trash from apps that don't have **Full Disk Access**. Without it
 ```bash
 python3 skills/organize/scripts/organizer.py info                 # platform, managed folders, trash backend
 python3 skills/organize/scripts/organizer.py config               # effective config (--init, --write FILE)
+python3 skills/organize/scripts/organizer.py onboarding           # onboarding questions (--apply answers.json [--dry-run])
 python3 skills/organize/scripts/organizer.py scan                 # read-only inventory as JSON
 python3 skills/organize/scripts/organizer.py check-project ~/Documents/my-app
 python3 skills/organize/scripts/organizer.py apply plan.json      # [{"op": "move", "src": "...", "dst": "..."}, {"op": "trash", "src": "..."}]

@@ -1,7 +1,7 @@
 {
   "_comment": "Copy to ~/.organize/config.json and keep only what you want to change. Missing keys use the defaults.",
   "folders": {
-    "desktop": "keep",
+    "desktop": { "policy": "tidy", "sections": ["In corso", "Da leggere", "Archivio"] },
     "downloads": "tidy",
     "documents": "tidy"
   },

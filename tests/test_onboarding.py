@@ -1,0 +1,100 @@
+import io
+import json
+from contextlib import redirect_stdout
+
+from base import TmpHome, organizer
+
+
+class OnboardingTest(TmpHome):
+    def cli(self, *argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = organizer.main(list(argv))
+        return code, json.loads(buf.getvalue())
+
+    def apply(self, answers, *extra):
+        f = self.home / "answers.json"
+        f.write_text(json.dumps(answers))
+        return self.cli("onboarding", "--apply", str(f), *extra)
+
+    def test_questions_file_is_well_formed(self):
+        ob = organizer.load_onboarding()
+        ids = set()
+        for r in ob["rounds"]:
+            self.assertLessEqual(len(r["questions"]), 4, r["id"])  # AskUserQuestion limit
+            for q in r["questions"]:
+                self.assertNotIn(q["id"], ids)
+                ids.add(q["id"])
+                self.assertLessEqual(len(q["header"]), 12, q["id"])
+                self.assertTrue(2 <= len(q["options"]) <= 4, q["id"])
+                for qid in (q.get("when") or {}):
+                    self.assertIn(qid, ids, f"{q['id']} depends on a later question")
+
+    def test_every_option_produces_a_valid_config(self):
+        ob = organizer.load_onboarding()
+        for r in ob["rounds"]:
+            for q in r["questions"]:
+                for o in q["options"]:
+                    answers = {k: v for k, v in (q.get("when") or {}).items()}
+                    answers = {k: (v[0] if isinstance(v, list) else v) for k, v in answers.items()}
+                    answers[q["id"]] = {"option": o["id"], "values": ["Alpha", "Beta"]} if o.get("values_to") else o["id"]
+                    if q["id"] == "documents" and o["id"] == "skip":
+                        answers.update(desktop="sections", downloads="junk_only")
+                    with self.subTest(q=q["id"], o=o["id"]):
+                        organizer.onboarding_to_config(answers)
+
+    def test_needed_until_done(self):
+        _, info = self.cli("info")
+        self.assertTrue(info["onboarding_needed"])
+        code, out = self.apply({"desktop": "sections",
+                                "desktop_sections": {"option": "custom", "values": ["Lavoro", "Da fare"]},
+                                "downloads": "empty", "documents": "topics", "trash": "never",
+                                "language": "mine", "_user_language": "it"})
+        self.assertEqual(code, 0, out)
+        cfg = out["config"]
+        self.assertEqual(cfg["folders"]["desktop"], {"policy": "tidy", "sections": ["Lavoro", "Da fare"]})
+        self.assertEqual(cfg["trash"], "never")
+        self.assertEqual(cfg["naming"]["language"], "it")
+        _, info = self.cli("info")
+        self.assertFalse(info["onboarding_needed"])
+
+    def test_dry_run_does_not_save(self):
+        code, out = self.apply({"desktop": "skip"}, "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIsNone(out["written"])
+        self.assertFalse((self.home / ".organize/config.json").exists())
+
+    def test_conditional_question_ignored_when_not_applicable(self):
+        _, out = self.apply({"desktop": "empty",
+                             "desktop_sections": {"option": "custom", "values": ["X"]}})
+        self.assertEqual(out["config"]["folders"]["desktop"], {"policy": "empty", "sections": []})
+
+    def test_rerun_keeps_unrelated_settings_and_drops_stale_sections(self):
+        (self.home / ".organize").mkdir()
+        (self.home / ".organize/config.json").write_text(json.dumps(
+            {"keep": ["*.lnk"], "folders": {"desktop": {"policy": "tidy", "sections": ["A"]}}}))
+        _, out = self.apply({"desktop": "junk_only"})
+        self.assertEqual(out["config"]["keep"], ["*.lnk"])
+        self.assertEqual(out["config"]["folders"]["desktop"], {"policy": "keep", "sections": []})
+        self.assertTrue((self.home / ".organize/config.json.bak").exists())
+
+    def test_conflict_reported(self):
+        code, out = self.apply({"desktop": "empty", "documents": "skip"})
+        self.assertEqual(code, 1)
+        self.assertIn("destination", out["detail"])
+        self.assertFalse((self.home / ".organize/config.json").exists())
+
+    def test_bad_answers(self):
+        for bad in ({"desktop": "explode"}, {"nope": "x"},
+                    {"desktop": "sections", "desktop_sections": "custom"}):
+            with self.subTest(bad=bad):
+                code, out = self.apply(bad)
+                self.assertEqual(code, 1)
+
+    def test_broken_config_can_be_replaced_by_onboarding(self):
+        (self.home / ".organize").mkdir()
+        (self.home / ".organize/config.json").write_text("{oops")
+        code, out = self.apply({"desktop": "skip"})
+        self.assertEqual(code, 0, out)
+        code, _ = self.cli("config")
+        self.assertEqual(code, 0)

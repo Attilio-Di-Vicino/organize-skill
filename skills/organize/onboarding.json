@@ -1,0 +1,175 @@
+{
+  "_comment": [
+    "Onboarding questions for /organize. Claude asks them round by round with AskUserQuestion",
+    "(max 4 questions per round, 2-4 options each; the user can always type 'Other'),",
+    "translated into the user's language. Answers are turned into ~/.organize/config.json by",
+    "`organizer.py onboarding --apply answers.json`.",
+    "",
+    "To extend the onboarding, add a question here. Fields:",
+    "  id        unique answer key",
+    "  header    short chip label (<= 12 chars)",
+    "  question  the question text",
+    "  when      optional: only ask if earlier answers match, e.g. {\"desktop\": \"sections\"}",
+    "            (a list value means any of them)",
+    "  options   [{id, label, description, set, values_to}]",
+    "    set        config values to apply: {\"dotted.key\": value}; \"$user_language\" is replaced",
+    "               by the language code Claude passes as _user_language",
+    "    values_to  dotted config key of a list that receives the free-text values the user typed",
+    "               (Claude splits the text into a list and passes it as {\"option\", \"values\"})"
+  ],
+  "version": 1,
+  "rounds": [
+    {
+      "id": "folders",
+      "intro": "First, how do you want each place on your computer to look after a run?",
+      "questions": [
+        {
+          "id": "desktop",
+          "header": "Desktop",
+          "question": "How do you want your Desktop?",
+          "options": [
+            { "id": "empty", "label": "Empty", "description": "Everything moves to Documents (or the Trash if it's junk)", "set": { "folders.desktop.policy": "empty" } },
+            { "id": "sections", "label": "In sections", "description": "Files stay on the Desktop, sorted into a few folders", "set": { "folders.desktop.policy": "tidy" } },
+            { "id": "junk_only", "label": "Only remove junk", "description": "Leave my files; just clean duplicates, temp files, installers", "set": { "folders.desktop.policy": "keep" } },
+            { "id": "skip", "label": "Don't touch it", "description": "Never scan or change the Desktop", "set": { "folders.desktop.policy": "skip" } }
+          ]
+        },
+        {
+          "id": "downloads",
+          "header": "Downloads",
+          "question": "How do you want your Downloads folder?",
+          "options": [
+            { "id": "empty", "label": "Empty", "description": "Everything moves to Documents (or the Trash if it's junk)", "set": { "folders.downloads.policy": "empty" } },
+            { "id": "sections", "label": "In sections", "description": "Files stay in Downloads, sorted into a few folders", "set": { "folders.downloads.policy": "tidy" } },
+            { "id": "junk_only", "label": "Only remove junk", "description": "Leave my files; just clean duplicates, temp files, installers", "set": { "folders.downloads.policy": "keep" } },
+            { "id": "skip", "label": "Don't touch it", "description": "Never scan or change Downloads", "set": { "folders.downloads.policy": "skip" } }
+          ]
+        },
+        {
+          "id": "documents",
+          "header": "Documents",
+          "question": "How do you want your Documents folder?",
+          "options": [
+            { "id": "topics", "label": "Topic folders", "description": "Sort everything into folders like Work, Finance, University", "set": { "folders.documents.policy": "tidy" } },
+            { "id": "junk_only", "label": "Only remove junk", "description": "Keep my structure; only clean duplicates and temp files", "set": { "folders.documents.policy": "keep" } },
+            { "id": "skip", "label": "Don't touch it", "description": "Never scan or change Documents", "set": { "folders.documents.policy": "skip" } }
+          ]
+        },
+        {
+          "id": "trash",
+          "header": "Trash",
+          "question": "What should happen to the Trash?",
+          "options": [
+            { "id": "ask", "label": "Offer to empty it", "description": "At the end, show what's in it and ask (separate confirmation)", "set": { "trash": "ask" } },
+            { "id": "never", "label": "Never touch it", "description": "Don't list it and never empty it", "set": { "trash": "never" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sections",
+      "intro": "You chose sections: which ones?",
+      "questions": [
+        {
+          "id": "desktop_sections",
+          "header": "Desktop",
+          "question": "Which sections do you want on the Desktop?",
+          "when": { "desktop": "sections" },
+          "options": [
+            { "id": "propose", "label": "Propose them", "description": "Claude suggests sections from what's on the Desktop each run" },
+            { "id": "work_style", "label": "In progress / To read / Archive", "set": { "folders.desktop.sections": ["In Progress", "To Read", "Archive"] } },
+            { "id": "custom", "label": "I'll name them", "description": "Type your sections, separated by commas", "values_to": "folders.desktop.sections" }
+          ]
+        },
+        {
+          "id": "downloads_sections",
+          "header": "Downloads",
+          "question": "Which sections do you want in Downloads?",
+          "when": { "downloads": "sections" },
+          "options": [
+            { "id": "by_type", "label": "By type", "description": "Documents, Images, Archives, Installers, Other", "set": { "folders.downloads.sections": ["Documents", "Images", "Archives", "Installers", "Other"] } },
+            { "id": "propose", "label": "Propose them", "description": "Claude suggests sections from what's there each run" },
+            { "id": "custom", "label": "I'll name them", "description": "Type your sections, separated by commas", "values_to": "folders.downloads.sections" }
+          ]
+        },
+        {
+          "id": "documents_topics",
+          "header": "Topics",
+          "question": "Which topic folders do you want in Documents?",
+          "when": { "documents": "topics" },
+          "options": [
+            { "id": "propose", "label": "Propose them", "description": "Claude builds them from what you already have" },
+            { "id": "custom", "label": "I'll name them", "description": "Type your topics, separated by commas", "values_to": "taxonomy" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "style",
+      "intro": "A couple of preferences on names and confirmations.",
+      "questions": [
+        {
+          "id": "language",
+          "header": "Names",
+          "question": "In which language should new folders be named?",
+          "options": [
+            { "id": "mine", "label": "My language", "description": "The language we're talking in", "set": { "naming.language": "$user_language" } },
+            { "id": "english", "label": "English", "set": { "naming.language": "en" } }
+          ]
+        },
+        {
+          "id": "case",
+          "header": "Style",
+          "question": "How should folder names be written?",
+          "options": [
+            { "id": "title", "label": "Title Case", "description": "Work Projects", "set": { "naming.case": "Title Case" } },
+            { "id": "lower", "label": "lowercase", "description": "work projects", "set": { "naming.case": "lowercase" } },
+            { "id": "kebab", "label": "kebab-case", "description": "work-projects", "set": { "naming.case": "kebab-case" } }
+          ]
+        },
+        {
+          "id": "confirm",
+          "header": "Confirm",
+          "question": "How should I ask before acting?",
+          "options": [
+            { "id": "batches", "label": "In groups", "description": "One question per group of similar files (faster)", "set": { "batch_size": 8 } },
+            { "id": "each", "label": "File by file", "description": "One question for every single file", "set": { "batch_size": 1 } }
+          ]
+        },
+        {
+          "id": "advice",
+          "header": "Tips",
+          "question": "Want tips at the end on staying organized?",
+          "options": [
+            { "id": "yes", "label": "Yes", "set": { "advice": true } },
+            { "id": "no", "label": "No", "set": { "advice": false } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "extras",
+      "intro": "Last one: anything to protect or any rule of your own?",
+      "questions": [
+        {
+          "id": "protected",
+          "header": "Protect",
+          "question": "Is there a folder I must never touch?",
+          "options": [
+            { "id": "no", "label": "No" },
+            { "id": "yes", "label": "Yes", "description": "Type the folder paths, separated by commas", "values_to": "protected" }
+          ]
+        },
+        {
+          "id": "rules",
+          "header": "Rules",
+          "question": "Any rule of your own? (e.g. \"never touch files from the last 7 days\")",
+          "options": [
+            { "id": "no", "label": "No" },
+            { "id": "yes", "label": "Yes", "description": "Type your rules, one per line or separated by ';'", "values_to": "rules" }
+          ]
+        }
+      ]
+    }
+  ]
+}

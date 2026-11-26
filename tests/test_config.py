@@ -27,7 +27,8 @@ class ConfigTest(TmpHome):
 
     def test_no_config_means_original_behaviour(self):
         cfg = organizer.load_config()
-        self.assertEqual(cfg["folders"], {"desktop": "empty", "downloads": "empty", "documents": "tidy"})
+        self.assertEqual({k: v["policy"] for k, v in cfg["folders"].items()},
+                         {"desktop": "empty", "downloads": "empty", "documents": "tidy"})
         self.assertEqual(cfg["trash"], "ask")
         names = [n for n, _, _ in organizer.managed_roots()]
         self.assertEqual(names, ["desktop", "downloads", "documents"])
@@ -35,8 +36,8 @@ class ConfigTest(TmpHome):
     def test_partial_config_merges_with_defaults(self):
         self.write_config({"folders": {"desktop": "keep"}})
         cfg = organizer.load_config()
-        self.assertEqual(cfg["folders"]["desktop"], "keep")
-        self.assertEqual(cfg["folders"]["downloads"], "empty")
+        self.assertEqual(cfg["folders"]["desktop"]["policy"], "keep")
+        self.assertEqual(cfg["folders"]["downloads"]["policy"], "empty")
         self.assertEqual(cfg["naming"]["case"], "Title Case")
 
     # validation
@@ -45,7 +46,10 @@ class ConfigTest(TmpHome):
         for bad in ({"folders": {"desktop": "nuke"}}, {"trash": "always"}, {"nope": 1},
                     {"max_depth": 0}, {"keep": "x"}, {"extra_folders": ["/etc"]},
                     {"extra_folders": ["~"]}, {"extra_folders": ["~/.ssh"]},
-                    {"folders": {"music": "tidy"}}):
+                    {"folders": {"music": "tidy"}},
+                    {"folders": {"desktop": {"policy": "empty", "sections": ["A"]}}},
+                    {"folders": {"desktop": {"policy": "tidy", "sections": ["../x"]}}},
+                    {"folders": {"documents": "skip"}}):
             with self.subTest(bad=bad):
                 with self.assertRaises(organizer.ConfigError):
                     organizer.validate_config(bad)

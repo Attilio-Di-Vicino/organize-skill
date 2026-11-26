@@ -9,6 +9,7 @@ Python 3.8+, standard library only.
 Commands:
   info                      platform, user folders, trash backend, effective config
   config [--init|--write F] show the effective config; create a starter file; validate+save F
+  onboarding [--apply A]    print the onboarding questions; turn answers A into the config
   scan [paths...]           JSON inventory of top-level items (default: every managed folder)
   check-project <path>      virtualenvs and scheduled jobs that depend on a folder's path
   apply <plan.json>         run a list of actions (mkdir / move / rename / trash)
@@ -142,6 +143,8 @@ DEFAULT_CONFIG: dict = {
     #   tidy  -> items may stay, but sorted into sub-folders inside it
     #   keep  -> leave items where they are; only propose clear junk (duplicates, temp…)
     #   skip  -> don't scan it and refuse any operation inside it
+    # A value can also be {"policy": "tidy", "sections": ["In Progress", "Archive"]}:
+    # sections are the sub-folders a tidy folder is sorted into (empty = Claude proposes).
     "folders": {"desktop": "empty", "downloads": "empty", "documents": "tidy"},
     # Where sorted items go: "documents" or an absolute / ~ path inside a managed folder.
     "destination": "documents",
@@ -166,6 +169,8 @@ DEFAULT_CONFIG: dict = {
     "advice": True,
     # Free-text extra rules for Claude, e.g. "Never touch files modified in the last 7 days".
     "rules": [],
+    # Version of onboarding.json the user last answered (0 = never onboarded).
+    "onboarding_version": 0,
 }
 
 
@@ -201,11 +206,12 @@ def validate_config(raw) -> dict:
         else:
             cfg[k] = v
 
-    for name, pol in cfg["folders"].items():
+    if not isinstance(cfg["folders"], dict):
+        raise ConfigError("folders must be an object")
+    for name, val in list(cfg["folders"].items()):
         if name not in ("desktop", "downloads", "documents"):
             raise ConfigError(f"folders.{name}: only desktop, downloads, documents")
-        if pol not in FOLDER_POLICIES:
-            raise ConfigError(f"folders.{name}: policy must be one of {FOLDER_POLICIES}")
+        cfg["folders"][name] = _folder_entry(val, f"folders.{name}")
     if cfg["trash"] not in TRASH_POLICIES:
         raise ConfigError(f"trash must be one of {TRASH_POLICIES}")
     for key in ("protected", "keep", "taxonomy", "rules", "extra_folders"):
@@ -218,6 +224,8 @@ def validate_config(raw) -> dict:
         raise ConfigError("max_depth must be an integer between 1 and 6")
     if not isinstance(cfg["batch_size"], int) or not 1 <= cfg["batch_size"] <= 50:
         raise ConfigError("batch_size must be an integer between 1 and 50")
+    if not isinstance(cfg["onboarding_version"], int) or cfg["onboarding_version"] < 0:
+        raise ConfigError("onboarding_version must be a non-negative integer")
     if not isinstance(cfg["advice"], bool):
         raise ConfigError("advice must be true or false")
     if not isinstance(cfg["naming"], dict):
@@ -230,18 +238,45 @@ def validate_config(raw) -> dict:
             e = {"path": e}
         if not isinstance(e, dict) or not isinstance(e.get("path"), str):
             raise ConfigError(f"extra_folders[{i}] needs a \"path\"")
-        pol = e.get("policy", "tidy")
-        if pol not in FOLDER_POLICIES:
-            raise ConfigError(f"extra_folders[{i}]: policy must be one of {FOLDER_POLICIES}")
+        entry = _folder_entry({"policy": e.get("policy", "tidy"), "sections": e.get("sections", [])},
+                              f"extra_folders[{i}]")
         p = _abs(_expand(e["path"]))
         if not _inside(p, h) or _key(p) == _key(h):
             raise ConfigError(f"extra_folders[{i}]: {e['path']} must be inside your home folder")
         rel = p.parts[len(h.parts):]
         if any(part.startswith(".") for part in rel) or (h / ".claude") == p:
             raise ConfigError(f"extra_folders[{i}]: hidden folders can't be managed")
-        extras.append({"path": str(p), "policy": pol})
+        extras.append({"path": str(p), **entry})
     cfg["extra_folders"] = extras
+
+    # sorted items need somewhere to go if any folder must be emptied
+    if any(f["policy"] == "empty" for f in list(cfg["folders"].values()) + extras):
+        dest = destination_dir(cfg)
+        roots = [r for _, r, _ in managed_roots(cfg)]
+        if not any(_inside(dest, _abs(r)) for r in roots):
+            raise ConfigError(
+                f"destination {cfg['destination']!r} is not a managed folder (skipped?), "
+                "but some folder is set to 'empty': choose another destination or another policy")
     return cfg
+
+
+def _folder_entry(val, where: str) -> dict:
+    if isinstance(val, str):
+        val = {"policy": val}
+    if not isinstance(val, dict) or set(val) - {"policy", "sections"}:
+        raise ConfigError(f"{where}: use a policy string or {{\"policy\", \"sections\"}}")
+    pol = val.get("policy", "tidy")
+    if pol not in FOLDER_POLICIES:
+        raise ConfigError(f"{where}: policy must be one of {FOLDER_POLICIES}")
+    sections = val.get("sections", [])
+    if not isinstance(sections, list) or not all(isinstance(x, str) and x.strip() for x in sections):
+        raise ConfigError(f"{where}.sections must be a list of names")
+    if sections and pol != "tidy":
+        raise ConfigError(f"{where}: sections only make sense with policy 'tidy'")
+    for x in sections:
+        if x.strip() in (".", "..") or "/" in x or "\\" in x or x.startswith("."):
+            raise ConfigError(f"{where}.sections: {x!r} is not a valid folder name")
+    return {"policy": pol, "sections": [x.strip() for x in sections]}
 
 
 def load_config() -> dict:
@@ -258,7 +293,7 @@ def load_config() -> dict:
 def managed_roots(cfg: Optional[dict] = None) -> List[Tuple[str, Path, str]]:
     """(name, path, policy) of every folder the skill may operate in; skipped ones excluded."""
     cfg = cfg or load_config()
-    out = [(k, v, cfg["folders"].get(k, "tidy")) for k, v in user_folders().items()]
+    out = [(k, v, cfg["folders"].get(k, {"policy": "tidy"})["policy"]) for k, v in user_folders().items()]
     out += [(Path(e["path"]).name, Path(e["path"]), e["policy"]) for e in cfg["extra_folders"]]
     return [r for r in out if r[2] != "skip"]
 
@@ -266,9 +301,90 @@ def managed_roots(cfg: Optional[dict] = None) -> List[Tuple[str, Path, str]]:
 def destination_dir(cfg: Optional[dict] = None) -> Path:
     cfg = cfg or load_config()
     d = cfg["destination"]
+    if not isinstance(d, str) or not d.strip():
+        raise ConfigError("destination must be a folder name or path")
     if d in user_folders():
         return user_folders()[d]
     return _abs(_expand(d))
+
+
+# ---------- onboarding ----------
+
+def onboarding_file() -> Path:
+    return skill_dir() / "onboarding.json"
+
+
+def load_onboarding() -> dict:
+    return json.loads(onboarding_file().read_text(encoding="utf-8"))
+
+
+def _matches(when: Optional[dict], answers: dict) -> bool:
+    for qid, want in (when or {}).items():
+        got = answers.get(qid)
+        got = got.get("option") if isinstance(got, dict) else got
+        if got not in (want if isinstance(want, list) else [want]):
+            return False
+    return True
+
+
+def _set_dotted(cfg: dict, dotted: str, value) -> None:
+    parts = dotted.split(".")
+    d = cfg
+    for i, part in enumerate(parts[:-1]):
+        nxt = d.get(part)
+        if isinstance(nxt, str) and parts[0] == "folders" and i == 1:
+            nxt = {"policy": nxt}           # "desktop": "tidy" -> {"policy": "tidy"}
+        if not isinstance(nxt, dict):
+            nxt = {}
+        d[part] = nxt
+        d = nxt
+    d[parts[-1]] = value
+
+
+def onboarding_to_config(answers: dict, base: Optional[dict] = None) -> dict:
+    """Turn onboarding answers into a raw config (merged over `base`), validated.
+
+    answers: {question_id: option_id | {"option": option_id, "values": [..]}, "_user_language": "it"}
+    Raises ConfigError on unknown questions/options or an invalid result.
+    """
+    ob = load_onboarding()
+    raw = json.loads(json.dumps(base or {}))
+    questions = {q["id"]: q for r in ob["rounds"] for q in r["questions"]}
+    lang = answers.get("_user_language") or "en"
+    unknown = set(answers) - set(questions) - {"_user_language"}
+    if unknown:
+        raise ConfigError(f"unknown onboarding question(s): {', '.join(sorted(unknown))}")
+    for r in ob["rounds"]:
+        for q in r["questions"]:
+            if q["id"] not in answers or not _matches(q.get("when"), answers):
+                continue
+            a = answers[q["id"]]
+            opt_id, values = (a.get("option"), a.get("values")) if isinstance(a, dict) else (a, None)
+            opt = next((o for o in q["options"] if o["id"] == opt_id), None)
+            if opt is None:
+                raise ConfigError(f"{q['id']}: unknown option {opt_id!r}")
+            for key, val in (opt.get("set") or {}).items():
+                _set_dotted(raw, key, lang if val == "$user_language" else val)
+            if opt.get("values_to"):
+                if not isinstance(values, list) or not values:
+                    raise ConfigError(f"{q['id']}: option {opt_id!r} needs \"values\" (a list)")
+                _set_dotted(raw, opt["values_to"], [str(v).strip() for v in values if str(v).strip()])
+    # a folder that's no longer "tidy" drops its sections
+    for f in (raw.get("folders") or {}).values():
+        if isinstance(f, dict) and f.get("policy") != "tidy":
+            f.pop("sections", None)
+    raw["onboarding_version"] = int(ob.get("version", 1))
+    validate_config(raw)
+    return raw
+
+
+def save_config(raw: dict) -> Path:
+    f = config_path()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    if f.exists():
+        shutil.copy2(str(f), str(f.with_suffix(".json.bak")))
+    f.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return f
 
 
 RUN_ID_RE = re.compile(r"^\d{8}-\d{6}(-\d+)?$")
@@ -962,6 +1078,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     g = cf.add_mutually_exclusive_group()
     g.add_argument("--init", action="store_true", help="write a starter config if none exists")
     g.add_argument("--write", metavar="FILE", help="validate FILE and save it as the config")
+    ob = sub.add_parser("onboarding")
+    ob.add_argument("--apply", metavar="ANSWERS", help="turn onboarding answers into the config")
+    ob.add_argument("--dry-run", action="store_true", help="with --apply: print the result, don't save")
     s = sub.add_parser("scan")
     s.add_argument("paths", nargs="*")
     s.add_argument("--no-metadata", action="store_true")
@@ -980,7 +1099,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         cfg = load_config()
     except ConfigError as ex:
-        if not (args.cmd == "config" and (args.write or args.init)):
+        if not ((args.cmd == "config" and (args.write or args.init)) or args.cmd == "onboarding"):
             _print({"error": "config", "detail": str(ex), "config_path": str(config_path())})
             return 3
         cfg = None
@@ -997,6 +1116,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "managed": [{"name": n, "path": str(p), "policy": pol} for n, p, pol in managed_roots(cfg)],
                 "destination": str(destination_dir(cfg)),
                 "config_path": str(config_path()), "config_exists": config_path().exists(),
+                "onboarding_needed": cfg["onboarding_version"] < int(load_onboarding().get("version", 1)),
                 "trash_backend": trash.name, "trash_readable": access,
                 "journal": str(journal_dir())})
     elif args.cmd == "config":
@@ -1015,13 +1135,31 @@ def main(argv: Optional[List[str]] = None) -> int:
             except (ConfigError, json.JSONDecodeError, OSError) as ex:
                 _print({"error": "invalid", "detail": str(ex)})
                 return 1
-            f.parent.mkdir(parents=True, exist_ok=True)
-            if f.exists():
-                shutil.copy2(str(f), str(f.with_suffix(".json.bak")))
-            f.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            save_config(raw)
             _print({"written": str(f), "config": new})
         else:
             _print({"config_path": str(f), "exists": f.exists(), "config": cfg})
+    elif args.cmd == "onboarding":
+        ob_data = load_onboarding()
+        if not args.apply:
+            _print({"version": ob_data.get("version", 1), "config_exists": config_path().exists(),
+                    "current": cfg, "rounds": ob_data["rounds"]})
+            return 0
+        base = {}
+        if config_path().exists():
+            try:
+                base = json.loads(config_path().read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                base = {}   # broken config: onboarding replaces it (a .bak is kept)
+        try:
+            answers = json.loads(Path(args.apply).read_text(encoding="utf-8"))
+            raw = onboarding_to_config(answers, base if isinstance(base, dict) else {})
+        except (ConfigError, json.JSONDecodeError, OSError) as ex:
+            _print({"error": "invalid", "detail": str(ex)})
+            return 1
+        if not args.dry_run:
+            save_config(raw)
+        _print({"written": None if args.dry_run else str(config_path()), "config": validate_config(raw)})
     elif args.cmd == "scan":
         paths = [Path(p).expanduser() for p in args.paths] or [r for _, r, _ in managed_roots(cfg)]
         _print(scan(paths, metadata=not args.no_metadata))
