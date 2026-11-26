@@ -50,7 +50,7 @@ class PathRulesTest(TmpHome):
         other = self.home / "Documents/my-skills/career"
         other.mkdir(parents=True)
         (self.home / ".claude/skills").mkdir(parents=True)
-        os.symlink(str(other), str(self.home / ".claude/skills/career"))
+        self.symlink(other, self.home / ".claude/skills/career")
         self.refused({"op": "move", "src": str(self.home / "Documents/my-skills"),
                       "dst": str(self.home / "Documents/Archive/my-skills")})
 
@@ -106,7 +106,7 @@ class SymlinkTest(TmpHome):
     def test_trashing_a_link_keeps_its_target(self):
         target = self.touch("Documents/Big/data.bin")
         link = self.home / "Desktop/Big"
-        os.symlink(str(target.parent), str(link))
+        self.symlink(target.parent, link)
         _, res = organizer.apply_plan([{"op": "trash", "src": str(link)}])
         self.assertEqual(res[0]["status"], "ok", res)
         self.assertTrue(target.exists())
@@ -120,7 +120,7 @@ class WindowsSymlinkTest(TmpHome):
     def test_link_removed_without_recycling_target_and_undo_recreates(self):
         target = self.touch("Documents/Big/data.bin")
         link = self.home / "Desktop/Big"
-        os.symlink(str(target.parent), str(link), target_is_directory=True)
+        self.symlink(target.parent, link, target_is_directory=True)
         called = []
         with mock.patch.object(organizer, "_run", lambda *a, **k: called.append(a)):
             run_id, res = organizer.apply_plan([{"op": "trash", "src": str(link)}])

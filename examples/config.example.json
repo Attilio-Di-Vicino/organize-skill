@@ -1,0 +1,71 @@
+{
+  "_comment": "Copy to ~/.organize/config.json and keep only what you want to change. Missing keys use the defaults.",
+  "folders": {
+    "desktop": {
+      "policy": "tidy",
+      "sections": [
+        "In corso",
+        "Da leggere",
+        "Archivio"
+      ]
+    },
+    "downloads": "tidy",
+    "documents": "tidy"
+  },
+  "extra_folders": [
+    {
+      "path": "~/Pictures",
+      "policy": "tidy"
+    }
+  ],
+  "destination": "documents",
+  "protected": [
+    "~/Documents/Obsidian Vault"
+  ],
+  "keep": [
+    "*.lnk",
+    "*.desktop",
+    "Inbox"
+  ],
+  "trash": "never",
+  "naming": {
+    "language": "system",
+    "case": "Title Case"
+  },
+  "taxonomy": [
+    "Lavoro",
+    "Università",
+    "Finanza",
+    "Personale",
+    "Progetti",
+    "Media",
+    "Archivio"
+  ],
+  "max_depth": 2,
+  "batch_size": 10,
+  "advice": false,
+  "archive": {
+    "large_mb": 500,
+    "stale_days": 365,
+    "top": 10
+  },
+  "rename_files": {
+    "pattern": "{date} - {title}",
+    "scope": "unclear"
+  },
+  "cleanup": {
+    "categories": [
+      "docker",
+      "tool",
+      "cache",
+      "empty"
+    ],
+    "min_size_mb": 100,
+    "leftover_min_age_days": 180
+  },
+  "rules": [
+    "Never touch files modified in the last 7 days.",
+    "PDFs from my bank go to Finanza/<year>.",
+    "Leave screenshots on the Desktop; I delete them myself."
+  ]
+}

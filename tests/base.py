@@ -28,6 +28,16 @@ class TmpHome(unittest.TestCase):
         os.environ.pop("ORGANIZE_PLATFORM", None)
         self.tmp.cleanup()
 
+    def symlink(self, target, link, target_is_directory=False):
+        """os.symlink, but skip the test where the OS doesn't allow it (Windows without
+        Developer Mode or admin rights: WinError 1314)."""
+        try:
+            os.symlink(str(target), str(link), target_is_directory=target_is_directory)
+        except OSError as e:
+            if getattr(e, "winerror", None) == 1314 or isinstance(e, NotImplementedError):
+                self.skipTest("creating symlinks needs Developer Mode or admin rights on Windows")
+            raise
+
     def touch(self, rel, text="x"):
         p = self.home / rel
         p.parent.mkdir(parents=True, exist_ok=True)

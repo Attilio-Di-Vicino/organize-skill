@@ -1,0 +1,600 @@
+{
+  "_comment": [
+    "Onboarding questions for /organize. Claude asks them round by round with AskUserQuestion",
+    "(max 4 questions per round, 2-4 options each; the user can always type 'Other').",
+    "Keep the source text in English; Claude asks in the conversation's language. Answers are",
+    "turned into ~/.organize/config.json by `organizer.py onboarding --apply answers.json`.",
+    "",
+    "To extend the onboarding, add a question here. Fields:",
+    "  id        unique answer key",
+    "  header    short chip label (<= 12 chars)",
+    "  question  the question text",
+    "  when      optional: only ask if answers match, e.g. {\"desktop\": \"sections\"} (answers not given in this run come from the current config)",
+    "            (a list value means any of them)",
+    "  options   [{id, label, description, set, values_to}]",
+    "    set        config values to apply: {\"dotted.key\": value}. If a value is a list of folder names",
+    "               (preset sections), Claude passes them translated into the naming language as",
+    "               {\"option\", \"values\"} (same length)",
+    "    values_to  dotted config key of a LIST that receives the free-text values the user typed",
+    "               (Claude splits the text into a list and passes it as {\"option\", \"values\"})",
+    "    text_to    dotted config key of a STRING that receives what the user typed, as {\"option\", \"text\"}",
+    "  since     onboarding version that introduced the question (users onboarded earlier are told",
+    "            new options exist; they are only asked if they request a new onboarding)"
+  ],
+  "version": 4,
+  "rounds": [
+    {
+      "id": "folders",
+      "intro": "First, how do you want each place on your computer to look after a run?",
+      "questions": [
+        {
+          "id": "desktop",
+          "header": "Desktop",
+          "question": "How do you want your Desktop?",
+          "options": [
+            {
+              "id": "empty",
+              "label": "Empty",
+              "description": "Everything moves to Documents (or the Trash if it's junk)",
+              "set": {
+                "folders.desktop.policy": "empty"
+              }
+            },
+            {
+              "id": "sections",
+              "label": "In sections",
+              "description": "Files stay on the Desktop, sorted into a few folders",
+              "set": {
+                "folders.desktop.policy": "tidy"
+              }
+            },
+            {
+              "id": "junk_only",
+              "label": "Only remove junk",
+              "description": "Leave my files; just clean duplicates, temp files, installers",
+              "set": {
+                "folders.desktop.policy": "keep"
+              }
+            },
+            {
+              "id": "skip",
+              "label": "Don't touch it",
+              "description": "Never scan or change the Desktop",
+              "set": {
+                "folders.desktop.policy": "skip"
+              }
+            }
+          ]
+        },
+        {
+          "id": "downloads",
+          "header": "Downloads",
+          "question": "How do you want your Downloads folder?",
+          "options": [
+            {
+              "id": "empty",
+              "label": "Empty",
+              "description": "Everything moves to Documents (or the Trash if it's junk)",
+              "set": {
+                "folders.downloads.policy": "empty"
+              }
+            },
+            {
+              "id": "sections",
+              "label": "In sections",
+              "description": "Files stay in Downloads, sorted into a few folders",
+              "set": {
+                "folders.downloads.policy": "tidy"
+              }
+            },
+            {
+              "id": "junk_only",
+              "label": "Only remove junk",
+              "description": "Leave my files; just clean duplicates, temp files, installers",
+              "set": {
+                "folders.downloads.policy": "keep"
+              }
+            },
+            {
+              "id": "skip",
+              "label": "Don't touch it",
+              "description": "Never scan or change Downloads",
+              "set": {
+                "folders.downloads.policy": "skip"
+              }
+            }
+          ]
+        },
+        {
+          "id": "documents",
+          "header": "Documents",
+          "question": "How do you want your Documents folder?",
+          "options": [
+            {
+              "id": "topics",
+              "label": "Topic folders",
+              "description": "Sort everything into folders like Work, Finance, University",
+              "set": {
+                "folders.documents.policy": "tidy"
+              }
+            },
+            {
+              "id": "junk_only",
+              "label": "Only remove junk",
+              "description": "Keep my structure; only clean duplicates and temp files",
+              "set": {
+                "folders.documents.policy": "keep"
+              }
+            },
+            {
+              "id": "skip",
+              "label": "Don't touch it",
+              "description": "Never scan or change Documents",
+              "set": {
+                "folders.documents.policy": "skip"
+              }
+            }
+          ]
+        },
+        {
+          "id": "trash",
+          "header": "Trash",
+          "question": "What should happen to the Trash?",
+          "options": [
+            {
+              "id": "ask",
+              "label": "Offer to empty it",
+              "description": "At the end, show what's in it and ask (separate confirmation)",
+              "set": {
+                "trash": "ask"
+              }
+            },
+            {
+              "id": "never",
+              "label": "Never touch it",
+              "description": "Don't list it and never empty it",
+              "set": {
+                "trash": "never"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sections",
+      "intro": "You chose sections: which ones?",
+      "questions": [
+        {
+          "id": "desktop_sections",
+          "header": "Desktop",
+          "question": "Which sections do you want on the Desktop?",
+          "when": {
+            "desktop": "sections"
+          },
+          "options": [
+            {
+              "id": "propose",
+              "label": "Propose them",
+              "description": "Claude suggests sections from what's on the Desktop each run"
+            },
+            {
+              "id": "work_style",
+              "label": "In progress / To read / Archive",
+              "set": {
+                "folders.desktop.sections": [
+                  "In Progress",
+                  "To Read",
+                  "Archive"
+                ]
+              }
+            },
+            {
+              "id": "custom",
+              "label": "I'll name them",
+              "description": "Type your sections, separated by commas",
+              "values_to": "folders.desktop.sections"
+            }
+          ]
+        },
+        {
+          "id": "downloads_sections",
+          "header": "Downloads",
+          "question": "Which sections do you want in Downloads?",
+          "when": {
+            "downloads": "sections"
+          },
+          "options": [
+            {
+              "id": "by_type",
+              "label": "By type",
+              "description": "Documents, Images, Archives, Installers, Other",
+              "set": {
+                "folders.downloads.sections": [
+                  "Documents",
+                  "Images",
+                  "Archives",
+                  "Installers",
+                  "Other"
+                ]
+              }
+            },
+            {
+              "id": "propose",
+              "label": "Propose them",
+              "description": "Claude suggests sections from what's there each run"
+            },
+            {
+              "id": "custom",
+              "label": "I'll name them",
+              "description": "Type your sections, separated by commas",
+              "values_to": "folders.downloads.sections"
+            }
+          ]
+        },
+        {
+          "id": "documents_topics",
+          "header": "Topics",
+          "question": "Which topic folders do you want in Documents?",
+          "when": {
+            "documents": "topics"
+          },
+          "options": [
+            {
+              "id": "propose",
+              "label": "Propose them",
+              "description": "Claude builds them from what you already have"
+            },
+            {
+              "id": "custom",
+              "label": "I'll name them",
+              "description": "Type your topics, separated by commas",
+              "values_to": "taxonomy"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "style",
+      "intro": "A couple of preferences on names and confirmations.",
+      "questions": [
+        {
+          "id": "language",
+          "header": "Names",
+          "question": "In which language should I name the folders and files I create?",
+          "options": [
+            {
+              "id": "system",
+              "label": "My computer's language",
+              "description": "Follows the system language on each computer (detected: {system_language})",
+              "set": {
+                "naming.language": "system"
+              }
+            },
+            {
+              "id": "english",
+              "label": "English",
+              "description": "Always English, whatever the system language",
+              "set": {
+                "naming.language": "en"
+              }
+            },
+            {
+              "id": "other",
+              "label": "Another language",
+              "description": "Type the language, e.g. French",
+              "text_to": "naming.language"
+            }
+          ],
+          "since": 3
+        },
+        {
+          "id": "case",
+          "header": "Style",
+          "question": "How should folder names be written?",
+          "options": [
+            {
+              "id": "title",
+              "label": "Title Case",
+              "description": "Work Projects",
+              "set": {
+                "naming.case": "Title Case"
+              }
+            },
+            {
+              "id": "lower",
+              "label": "lowercase",
+              "description": "work projects",
+              "set": {
+                "naming.case": "lowercase"
+              }
+            },
+            {
+              "id": "kebab",
+              "label": "kebab-case",
+              "description": "work-projects",
+              "set": {
+                "naming.case": "kebab-case"
+              }
+            }
+          ]
+        },
+        {
+          "id": "confirm",
+          "header": "Confirm",
+          "question": "How should I ask before acting?",
+          "options": [
+            {
+              "id": "batches",
+              "label": "In groups",
+              "description": "One question per group of similar files (faster)",
+              "set": {
+                "batch_size": 8
+              }
+            },
+            {
+              "id": "each",
+              "label": "File by file",
+              "description": "One question for every single file",
+              "set": {
+                "batch_size": 1
+              }
+            }
+          ]
+        },
+        {
+          "id": "advice",
+          "header": "Tips",
+          "question": "Want tips at the end on staying organized?",
+          "options": [
+            {
+              "id": "yes",
+              "label": "Yes",
+              "set": {
+                "advice": true
+              }
+            },
+            {
+              "id": "no",
+              "label": "No",
+              "set": {
+                "advice": false
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "files",
+      "intro": "Now about the files themselves, and clutter elsewhere on the computer.",
+      "questions": [
+        {
+          "id": "rename",
+          "since": 2,
+          "header": "File names",
+          "question": "Should I rename files with unclear names (IMG_1234, document (3)…) when I sort them?",
+          "options": [
+            {
+              "id": "keep",
+              "label": "Keep their names",
+              "description": "Never rename files",
+              "set": {
+                "rename_files.pattern": ""
+              }
+            },
+            {
+              "id": "date_first",
+              "label": "Date - Title",
+              "description": "2026-11-03 - Electricity Bill.pdf",
+              "set": {
+                "rename_files.pattern": "{date} - {title}"
+              }
+            },
+            {
+              "id": "title_first",
+              "label": "Title - Date",
+              "description": "Electricity Bill - 2026-11-03.pdf",
+              "set": {
+                "rename_files.pattern": "{title} - {date}"
+              }
+            },
+            {
+              "id": "custom",
+              "label": "My own scheme",
+              "description": "Describe it, e.g. \"year, category and title\"",
+              "text_to": "rename_files.pattern"
+            }
+          ]
+        },
+        {
+          "id": "stale",
+          "since": 2,
+          "header": "Old files",
+          "question": "Should I suggest archiving files you haven't opened in a long time?",
+          "options": [
+            {
+              "id": "6m",
+              "label": "After 6 months",
+              "set": {
+                "archive.stale_days": 182
+              }
+            },
+            {
+              "id": "1y",
+              "label": "After 1 year",
+              "set": {
+                "archive.stale_days": 365
+              }
+            },
+            {
+              "id": "2y",
+              "label": "After 2 years",
+              "set": {
+                "archive.stale_days": 730
+              }
+            },
+            {
+              "id": "never",
+              "label": "Never",
+              "set": {
+                "archive.stale_days": 0
+              }
+            }
+          ]
+        },
+        {
+          "id": "large",
+          "since": 2,
+          "header": "Big files",
+          "question": "Should I point out the files taking the most space?",
+          "options": [
+            {
+              "id": "100",
+              "label": "Over 100 MB",
+              "set": {
+                "archive.large_mb": 100
+              }
+            },
+            {
+              "id": "500",
+              "label": "Over 500 MB",
+              "set": {
+                "archive.large_mb": 500
+              }
+            },
+            {
+              "id": "1000",
+              "label": "Over 1 GB",
+              "set": {
+                "archive.large_mb": 1024
+              }
+            },
+            {
+              "id": "no",
+              "label": "No",
+              "set": {
+                "archive.large_mb": 0
+              }
+            }
+          ]
+        },
+        {
+          "id": "cleanup",
+          "since": 4,
+          "header": "Cleanup",
+          "question": "Should I also look for clutter outside your folders (Docker, caches, leftovers of uninstalled apps)? I'd ask before removing anything.",
+          "options": [
+            {
+              "id": "all",
+              "label": "Yes, everything",
+              "description": "Docker, package and app caches, leftovers of old apps, empty folders",
+              "set": {
+                "cleanup.categories": [
+                  "docker",
+                  "tool",
+                  "cache",
+                  "leftover",
+                  "empty"
+                ]
+              }
+            },
+            {
+              "id": "safe",
+              "label": "Only Docker and caches",
+              "description": "Things that are rebuilt automatically",
+              "set": {
+                "cleanup.categories": [
+                  "docker",
+                  "tool",
+                  "cache",
+                  "empty"
+                ]
+              }
+            },
+            {
+              "id": "no",
+              "label": "No",
+              "description": "Only tidy my folders",
+              "set": {
+                "cleanup.categories": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "extras",
+      "intro": "Last few: renaming scope, anything to protect, rules of your own.",
+      "questions": [
+        {
+          "id": "rename_scope",
+          "since": 2,
+          "header": "Rename",
+          "question": "Which files should I rename?",
+          "when": {
+            "rename": [
+              "date_first",
+              "title_first",
+              "custom"
+            ]
+          },
+          "options": [
+            {
+              "id": "unclear",
+              "label": "Only unclear names",
+              "description": "IMG_1234, document (3), scan0001…",
+              "set": {
+                "rename_files.scope": "unclear"
+              }
+            },
+            {
+              "id": "all",
+              "label": "Every file I move",
+              "description": "All moved files follow the scheme",
+              "set": {
+                "rename_files.scope": "all"
+              }
+            }
+          ]
+        },
+        {
+          "id": "protected",
+          "header": "Protect",
+          "question": "Is there a folder I must never touch?",
+          "options": [
+            {
+              "id": "no",
+              "label": "No"
+            },
+            {
+              "id": "yes",
+              "label": "Yes",
+              "description": "Type the folder paths, separated by commas",
+              "values_to": "protected"
+            }
+          ]
+        },
+        {
+          "id": "rules",
+          "header": "Rules",
+          "question": "Any rule of your own? (e.g. \"never touch files from the last 7 days\")",
+          "options": [
+            {
+              "id": "no",
+              "label": "No"
+            },
+            {
+              "id": "yes",
+              "label": "Yes",
+              "description": "Type your rules, one per line or separated by ';'",
+              "values_to": "rules"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
