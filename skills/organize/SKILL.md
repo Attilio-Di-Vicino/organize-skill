@@ -115,8 +115,21 @@ The full run is steps 1–10. If the user asks for just one part ("clean Docker"
 Run `info`. If `onboarding_needed` is true, do the **Onboarding** first (mandatory). Then run `config` and briefly tell the user which preferences are active (one or two lines: e.g. "Desktop: sections (Work, To Do) · Downloads: empty · Trash: never · 2 custom rules").
 If `trash` is `ask` and `trash_readable` is false, tell the user in one line how to fix it (macOS: System Settings → Privacy & Security → Full Disk Access → enable the app running Claude Code, then restart it).
 
+### 1b. Choose what to organize this run
+Every run, right after step 1 (and after the onboarding, if there was one), ask with AskUserQuestion, `multiSelect: true`, header `Folders`:
+"Which folders should I organize this time? Select all four for everything."
+Options, in this order and with the folder names localized like the rest of the conversation: `Desktop`, `Downloads`, `Documents`, `Trash` (`Recycle Bin` on Windows). Leave out any folder whose policy is `skip`, and leave out the Trash if `trash` is `never`. If `extra_folders` exist, add to the question "…or type the name of another folder you manage (<names>)". If the user types something like "all"/"tutte", that means everything.
+
+Don't ask when the request already says what to do ("tidy my Downloads", "empty the Trash", "clean Docker"); use that instead.
+
+The selection limits this run only. It never changes the config.
+- **Scan** (step 2) only the selected folders: `scan <path> <path>…`. If Documents isn't selected, Documents can still receive sorted items as the destination, but don't reorganize what's already in it.
+- **Big and forgotten files** (step 7): only show entries whose `location` is a selected folder.
+- **System cleanup** (step 8): only when everything was selected, or the user asked for it.
+- **Trash** (step 9): only when the Trash was selected. If only the Trash was selected, skip straight to step 9.
+
 ### 2. Scan
-Run `scan > <scratch>/scan.json`, then summarize: counts per folder (with its policy), duplicates, extracted archives, installers, temp files, code projects, unclear names, big and long-unused items, space that can be freed. Peek inside folders whose name says nothing.
+Run `scan > <scratch>/scan.json` (with the paths chosen in step 1b), then summarize: counts per folder (with its policy), duplicates, extracted archives, installers, temp files, code projects, unclear names, big and long-unused items, space that can be freed. Peek inside folders whose name says nothing.
 
 ### 3. Destination structure
 Look at the existing top-level folders in the destination (peek inside ambiguous ones). Propose a taxonomy using `naming_language` and `naming.case`:

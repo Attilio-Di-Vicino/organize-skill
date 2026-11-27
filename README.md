@@ -8,6 +8,7 @@ Type `/organize` in [Claude Code](https://claude.com/claude-code) and it tidies 
 - shows your **biggest and long-forgotten files** and offers to archive them
 - **frees disk space outside your folders**: unused Docker images and build cache, npm / pip / Homebrew caches, app caches, leftovers of apps you uninstalled
 - works out what to **keep and what to throw away**: identical duplicates, zips you already extracted, installers for apps you already have, Office lock files, half-finished downloads
+- **asks which folders to work on** every time you run it: Desktop, Downloads, Documents, Trash, or all of them
 - **asks yes/no before every action**, in batches, from the terminal
 - leaves your code projects working: before moving a project it checks for virtualenvs and scheduled jobs that would break
 - lets you **undo** every run
