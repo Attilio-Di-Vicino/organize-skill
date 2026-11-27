@@ -376,7 +376,7 @@ def validate_config(raw) -> dict:
     if any(f["policy"] == "empty" for f in list(cfg["folders"].values()) + extras):
         dest = destination_dir(cfg)
         roots = [r for _, r, _ in managed_roots(cfg)]
-        if not any(_inside(dest, _abs(r)) for r in roots):
+        if not any(_inside(_abs(dest), _abs(r)) for r in roots):
             raise ConfigError(
                 f"destination {cfg['destination']!r} is not a managed folder (skipped?), "
                 "but some folder is set to 'empty': choose another destination or another policy")
@@ -1742,7 +1742,7 @@ def report(top: Optional[int] = None) -> dict:
             keep_dirs = []
             for d in sorted(dirs):
                 dp = curp / d
-                if (_is_hidden(dp) or dp.is_symlink() or any(_inside(dp, pp) for pp in protected)
+                if (_is_hidden(dp) or dp.is_symlink() or any(_inside(_abs(dp), pp) for pp in protected)
                         or (curp == root and CLOUD_ROOT_RE.match(d))):
                     continue
                 if _is_code_project(dp):
@@ -1760,7 +1760,7 @@ def report(top: Optional[int] = None) -> dict:
                     truncated = True
                     break
                 fp = curp / f
-                if _is_hidden(fp) or any(_inside(fp, pp) for pp in protected):
+                if _is_hidden(fp) or any(_inside(_abs(fp), pp) for pp in protected):
                     continue
                 try:
                     st = fp.lstat()

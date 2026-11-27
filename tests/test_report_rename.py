@@ -1,3 +1,4 @@
+from pathlib import Path
 import io
 import json
 import os
@@ -68,6 +69,13 @@ class ReportTest(TmpHome):
         self.assertTrue(paths[1].endswith("app"))            # code project counted whole
         self.assertFalse(any("secret" in p or "hidden" in p or "node_modules" in p for p in paths))
         self.assertEqual([e["path"] for e in r["biggest_stale"]], [paths[0]])
+
+    def test_protected_file_not_reported(self):
+        self.write_config({"archive": {"top": 5, "large_mb": 1}, "protected": ["~/Documents/keep.bin"]})
+        self.sized("Documents/keep.bin", 9 * MB)
+        self.sized("Documents/other.bin", 2 * MB)
+        paths = [e["path"] for e in organizer.report()["biggest"]]
+        self.assertEqual([Path(x).name for x in paths], ["other.bin"])
 
     def test_skipped_folder_not_reported(self):
         self.write_config({"folders": {"downloads": "skip"}})
